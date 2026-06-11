@@ -28,6 +28,9 @@ export interface Vehicle {
   licensePlate: string;
   currentOdometer: number;
   color?: string;
+  driverName?: string;
+  driverEmail?: string;
+  driverPhone?: string;
 }
 
 export interface AppTheme {

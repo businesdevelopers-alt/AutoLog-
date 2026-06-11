@@ -17,6 +17,8 @@ import {
   Settings,
   ChevronRight,
   ChevronLeft,
+  Menu,
+  X,
   LayoutList,
   MoreVertical,
   ArrowUpRight,
@@ -44,7 +46,11 @@ import {
   Maximize,
   Disc,
   Droplets,
-  Sparkles
+  Sparkles,
+  ShieldCheck,
+  Waves,
+  Globe,
+  Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -72,8 +78,34 @@ import { MAINTENANCE_TYPES, EXPENSE_CATEGORIES, PREDEFINED_THEMES, BREAKDOWN_CAT
 import { cn, formatCurrency, formatNumber } from './lib/utils';
 import { Card, Button, Modal } from './components/UI';
 import { MaintenanceSuggestions } from './components/MaintenanceSuggestions';
+import { LandingPage } from './components/LandingPage';
+import { NearbyWorkshopsMap } from './components/NearbyWorkshopsMap';
 
 import { AIAssistant } from './components/AIAssistant';
+import { initAuth, googleSignIn, logout, createAndExportToSheets } from './services/googleSheets';
+import { createAndExportToDocs } from './services/googleDocs';
+import { createInspectionForm, createFeedbackSurvey } from './services/googleForms';
+import { fetchGoogleContacts, createGoogleContact, deleteGoogleContact } from './services/googleContacts';
+import type { GoogleContact } from './services/googleContacts';
+
+// Firebase Authentication & Firestore imports
+import { onAuthStateChanged, User, signInWithPopup, signOut } from 'firebase/auth';
+import { auth, googleProvider } from './services/firebase';
+import { 
+  loadUserAppData, 
+  saveVehicle, 
+  saveMaintenanceRecord, 
+  saveExpense, 
+  saveFuelRecord, 
+  saveMaintenanceReminder, 
+  deleteMaintenanceReminder, 
+  saveBreakdown, 
+  deleteBreakdown as deleteBreakdownCloud, 
+  deleteVehicleAndAllDependencies, 
+  saveUserProfile, 
+  migrateLocalDataToFirestore 
+} from './services/firestoreSync';
+import { LogIn, LogOut, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 
 const INITIAL_DATA: AppData = {
   vehicles: [],
@@ -84,7 +116,7 @@ const INITIAL_DATA: AppData = {
   breakdowns: [],
 };
 
-type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant';
+type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant' | 'contacts';
 
 export default function App() {
   const [data, setData] = React.useState<AppData>(() => {
@@ -92,7 +124,17 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_DATA;
   });
   const [activeView, setActiveView] = useState<View>('dashboard');
+  const [showLanding, setShowLanding] = useState<boolean>(() => {
+    const saved = localStorage.getItem('autolog_show_landing');
+    return saved ? JSON.parse(saved) : true;
+  });
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  
+  // Custom Firebase authentication states
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [loadingCloud, setLoadingCloud] = useState<boolean>(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   
   // Modals state
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
@@ -132,9 +174,329 @@ export default function App() {
   const [breakdownDateRange, setBreakdownDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' });
   const [breakdownCostRange, setBreakdownCostRange] = useState<{ min: string; max: string }>({ min: '', max: '' });
 
+  // Google Sheets & Docs integration state
+  const [googleUser, setGoogleUser] = useState<any>(null);
+  const [gAccessToken, setGAccessToken] = useState<string | null>(null);
+  const [isExportingSheets, setIsExportingSheets] = useState(false);
+  const [exportSuccessUrl, setExportSuccessUrl] = useState<string | null>(null);
+  const [isExportingDocs, setIsExportingDocs] = useState(false);
+  const [exportDocsSuccessUrl, setExportDocsSuccessUrl] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  // Google Forms states
+  const [isCreatingForm, setIsCreatingForm] = useState(false);
+  const [formSuccessUrl, setFormSuccessUrl] = useState<string | null>(null);
+  const [formResponderUrl, setFormResponderUrl] = useState<string | null>(null);
+  const [formTypeCreated, setFormTypeCreated] = useState<string | null>(null);
+  const [formsVehicleId, setFormsVehicleId] = useState<string>('all');
+
+  // Google Contacts states
+  const [contacts, setContacts] = useState<GoogleContact[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [isCreateContactModalOpen, setIsCreateContactModalOpen] = useState(false);
+  const [newContactForm, setNewContactForm] = useState({ name: '', email: '', phoneNumber: '' });
+  const [isSavingContact, setIsSavingContact] = useState(false);
+  const [contactsSearch, setContactsSearch] = useState('');
+
+  const loadContacts = async () => {
+    if (!gAccessToken) return;
+    setContactsLoading(true);
+    setContactsError(null);
+    try {
+      const list = await fetchGoogleContacts(gAccessToken);
+      setContacts(list);
+    } catch (err: any) {
+      console.error(err);
+      setContactsError(err.message || "فشل تحميل جهات الاتصال.");
+    } finally {
+      setContactsLoading(false);
+    }
+  };
+
+  const handleCreateContact = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gAccessToken) return;
+    if (!newContactForm.name.trim()) return;
+
+    setIsSavingContact(true);
+    try {
+      const created = await createGoogleContact(gAccessToken, newContactForm);
+      setContacts(prev => [created, ...prev]);
+      setIsCreateContactModalOpen(false);
+      setNewContactForm({ name: '', email: '', phoneNumber: '' });
+    } catch (err: any) {
+      alert(err.message || 'فشل إضافة جهة الاتصال');
+    } finally {
+      setIsSavingContact(false);
+    }
+  };
+
+  const handleDeleteContact = async (resourceName: string, name: string) => {
+    const isConfirmed = window.confirm(
+      `هل أنت متأكد من حذف جهة الاتصال "${name}" نهائياً من حساب Google الخاص بك؟`
+    );
+    if (!isConfirmed) return;
+
+    try {
+      if (gAccessToken) {
+        await deleteGoogleContact(gAccessToken, resourceName);
+        setContacts(prev => prev.filter(c => c.resourceName !== resourceName));
+      }
+    } catch (err: any) {
+      alert(err.message || 'فشل حذف جهة الاتصال');
+    }
+  };
+
   useEffect(() => {
-    if (data.vehicles.length > 0 && !suggestionVehicleId) {
-      setSuggestionVehicleId(data.vehicles[0].id);
+    if (gAccessToken && activeView === 'contacts') {
+      loadContacts();
+    }
+  }, [gAccessToken, activeView]);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGAccessToken(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setGAccessToken(null);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const handleSheetsExport = async () => {
+    if (!gAccessToken) {
+      setExportError("الرجاء تسجيل الدخول أولاً باستخدام حساب Google لتتمكن من التصدير.");
+      return;
+    }
+    
+    setIsExportingSheets(true);
+    setExportSuccessUrl(null);
+    setExportError(null);
+
+    try {
+      const records = data.records.filter(r => (reportConfig.vehicleId === 'all' || r.vehicleId === reportConfig.vehicleId) && r.date >= reportConfig.startDate && r.date <= reportConfig.endDate);
+      const expenses = data.expenses.filter(e => (reportConfig.vehicleId === 'all' || e.vehicleId === reportConfig.vehicleId) && e.date >= reportConfig.startDate && e.date <= reportConfig.endDate);
+      const fuel = (data.fuelRecords || []).filter(f => (reportConfig.vehicleId === 'all' || f.vehicleId === reportConfig.vehicleId) && f.date >= reportConfig.startDate && f.date <= reportConfig.endDate);
+
+      const recordsCost = records.reduce((s, r) => s + r.cost, 0);
+      const expensesCost = expenses.reduce((s, e) => s + e.amount, 0);
+      const fuelCost = fuel.reduce((s, f) => s + f.cost, 0);
+      const totalSpent = recordsCost + expensesCost + fuelCost;
+
+      const diff = (new Date(reportConfig.endDate).getTime() - new Date(reportConfig.startDate).getTime()) / (1000 * 60 * 60 * 24);
+      const dailyAvg = formatCurrency(totalSpent / (Math.max(1, diff)));
+
+      const rows = [
+        ...records.map(r => ({
+          vehicle: data.vehicles.find(v => v.id === r.vehicleId)?.model || '—',
+          date: r.date,
+          type: MAINTENANCE_TYPES[r.type]?.label || 'صيانة',
+          details: r.title + (r.notes ? ` - ${r.notes}` : ''),
+          amount: r.cost
+        })),
+        ...expenses.map(e => ({
+          vehicle: data.vehicles.find(v => v.id === e.vehicleId)?.model || '—',
+          date: e.date,
+          type: EXPENSE_CATEGORIES[e.category]?.label || 'مصروف',
+          details: e.notes || '—',
+          amount: e.amount
+        })),
+        ...fuel.map(f => ({
+          vehicle: data.vehicles.find(v => v.id === f.vehicleId)?.model || '—',
+          date: f.date,
+          type: 'تعبئة وقود',
+          details: `${f.liters} لتر - ${f.station || 'محطة الوقود'}`,
+          amount: f.cost
+        }))
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      const res = await createAndExportToSheets(gAccessToken, {
+        title: "تقرير الصيانة والمصاريف للسيارات - أوتو كير",
+        startDate: reportConfig.startDate,
+        endDate: reportConfig.endDate,
+        vehicleName: reportConfig.vehicleId === 'all' ? 'كافة المركبات' : data.vehicles.find(v => v.id === reportConfig.vehicleId)?.model || '—',
+        totalOps: rows.length,
+        totalSpent,
+        dailyAvg,
+        rows
+      });
+
+      setExportSuccessUrl(res.spreadsheetUrl);
+    } catch (err: any) {
+      console.error(err);
+      setExportError(err.message || "حدث خطأ أثناء تصدير البيانات إلى Google Sheets.");
+    } finally {
+      setIsExportingSheets(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setGoogleUser(res.user);
+        setGAccessToken(res.accessToken);
+        setExportError(null);
+      }
+    } catch (err: any) {
+      setExportError(err.message || "فشل تسجيل الدخول باستخدام حساب Google.");
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    try {
+      await logout();
+      setGoogleUser(null);
+      setGAccessToken(null);
+      setExportSuccessUrl(null);
+      setExportDocsSuccessUrl(null);
+      setExportError(null);
+    } catch (err: any) {
+      console.error("Sign out failed", err);
+    }
+  };
+
+  const handleDocsExport = async () => {
+    if (!gAccessToken) {
+      setExportError("الرجاء تسجيل الدخول أولاً باستخدام حساب Google لتتمكن من التصدير.");
+      return;
+    }
+    
+    setIsExportingDocs(true);
+    setExportDocsSuccessUrl(null);
+    setExportError(null);
+
+    try {
+      const records = data.records.filter(r => (reportConfig.vehicleId === 'all' || r.vehicleId === reportConfig.vehicleId) && r.date >= reportConfig.startDate && r.date <= reportConfig.endDate);
+      const expenses = data.expenses.filter(e => (reportConfig.vehicleId === 'all' || e.vehicleId === reportConfig.vehicleId) && e.date >= reportConfig.startDate && e.date <= reportConfig.endDate);
+      const fuel = (data.fuelRecords || []).filter(f => (reportConfig.vehicleId === 'all' || f.vehicleId === reportConfig.vehicleId) && f.date >= reportConfig.startDate && f.date <= reportConfig.endDate);
+
+      const recordsCost = records.reduce((s, r) => s + r.cost, 0);
+      const expensesCost = expenses.reduce((s, e) => s + e.amount, 0);
+      const fuelCost = fuel.reduce((s, f) => s + f.cost, 0);
+      const totalSpent = recordsCost + expensesCost + fuelCost;
+
+      const diff = (new Date(reportConfig.endDate).getTime() - new Date(reportConfig.startDate).getTime()) / (1000 * 60 * 60 * 24);
+      const dailyAvg = formatCurrency(totalSpent / (Math.max(1, diff)));
+
+      const rows = [
+        ...records.map(r => ({
+          vehicle: data.vehicles.find(v => v.id === r.vehicleId)?.model || '—',
+          date: r.date,
+          type: MAINTENANCE_TYPES[r.type]?.label || 'صيانة',
+          details: r.title + (r.notes ? ` - ${r.notes}` : ''),
+          amount: r.cost
+        })),
+        ...expenses.map(e => ({
+          vehicle: data.vehicles.find(v => v.id === e.vehicleId)?.model || '—',
+          date: e.date,
+          type: EXPENSE_CATEGORIES[e.category]?.label || 'مصروف',
+          details: e.notes || '—',
+          amount: e.amount
+        })),
+        ...fuel.map(f => ({
+          vehicle: data.vehicles.find(v => v.id === f.vehicleId)?.model || '—',
+          date: f.date,
+          type: 'تعبئة وقود',
+          details: `${f.liters} لتر - ${f.station || 'محطة الوقود'}`,
+          amount: f.cost
+        }))
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      const res = await createAndExportToDocs(gAccessToken, {
+        title: "تقرير الصيانة والمصاريف للسيارات - أوتو كير",
+        startDate: reportConfig.startDate,
+        endDate: reportConfig.endDate,
+        vehicleName: reportConfig.vehicleId === 'all' ? 'كافة المركبات' : data.vehicles.find(v => v.id === reportConfig.vehicleId)?.model || '—',
+        totalOps: rows.length,
+        totalSpent,
+        dailyAvg,
+        rows
+      });
+
+      setExportDocsSuccessUrl(res.documentUrl);
+    } catch (err: any) {
+      console.error(err);
+      setExportError(err.message || "حدث خطأ أثناء تصدير البيانات إلى Google Docs.");
+    } finally {
+      setIsExportingDocs(false);
+    }
+  };
+
+  const handleCreateInspectionForm = async () => {
+    if (!gAccessToken) {
+      setExportError("الرجاء تسجيل الدخول أولاً باستخدام حساب Google لتتمكن من إنشاء النموذج.");
+      return;
+    }
+    
+    const vehicle = data.vehicles.find(v => v.id === formsVehicleId);
+    if (!vehicle) {
+      setExportError("الرجاء تحديد مركبة صالحة أولاً لإنشاء نموذج فحص مخصص.");
+      return;
+    }
+
+    setIsCreatingForm(true);
+    setFormSuccessUrl(null);
+    setFormResponderUrl(null);
+    setFormTypeCreated(null);
+    setExportError(null);
+
+    try {
+      const res = await createInspectionForm(gAccessToken, {
+        make: vehicle.make,
+        model: vehicle.model,
+        year: vehicle.year,
+        id: vehicle.id
+      });
+      setFormSuccessUrl(res.formUrl);
+      setFormResponderUrl(res.responderUrl);
+      setFormTypeCreated('inspection');
+    } catch (err: any) {
+      console.error(err);
+      setExportError(err.message || "حدث خطأ أثناء إنشاء استمارة الفحص الدوري عبر Google Forms.");
+    } finally {
+      setIsCreatingForm(false);
+    }
+  };
+
+  const handleCreateFeedbackSurvey = async () => {
+    if (!gAccessToken) {
+      setExportError("الرجاء تسجيل الدخول أولاً باستخدام حساب Google لتتمكن من إنشاء الاستبيان.");
+      return;
+    }
+
+    setIsCreatingForm(true);
+    setFormSuccessUrl(null);
+    setFormResponderUrl(null);
+    setFormTypeCreated(null);
+    setExportError(null);
+
+    try {
+      const res = await createFeedbackSurvey(gAccessToken);
+      setFormSuccessUrl(res.formUrl);
+      setFormResponderUrl(res.responderUrl);
+      setFormTypeCreated('feedback');
+    } catch (err: any) {
+      console.error(err);
+      setExportError(err.message || "حدث خطأ أثناء إنشاء استبيان تقييم الصيانة عبر Google Forms.");
+    } finally {
+      setIsCreatingForm(false);
+    }
+  };
+
+  useEffect(() => {
+    if (data.vehicles.length > 0) {
+      if (!suggestionVehicleId) {
+        setSuggestionVehicleId(data.vehicles[0].id);
+      }
+      if (formsVehicleId === 'all') {
+        setFormsVehicleId(data.vehicles[0].id);
+      }
     }
   }, [data.vehicles]);
 
@@ -168,9 +530,130 @@ export default function App() {
     localStorage.setItem('autolog_data', JSON.stringify(data));
   }, [data]);
 
+  // Listen to Firebase authentication transitions and run cloud data synchronization
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        setLoadingCloud(true);
+        setSyncError(null);
+        try {
+          // Sync any local unsaved data to Firestore automatically if the database has nothing yet
+          const localSaved = localStorage.getItem('autolog_data');
+          if (localSaved) {
+            const parsed = JSON.parse(localSaved) as AppData;
+            if (parsed.vehicles && parsed.vehicles.length > 0) {
+              await migrateLocalDataToFirestore(user.uid, parsed);
+            }
+          }
+          // Fetch the consolidated data from Cloud Firestore
+          const cloudData = await loadUserAppData(user.uid);
+          setData(cloudData);
+        } catch (error: any) {
+          console.error("Cloud synchronization failed:", error);
+          setSyncError(error?.message || "فشلت عملية المزامنة السحابية.");
+        } finally {
+          setLoadingCloud(false);
+        }
+      } else {
+        // If logged out, reset state to local localstorage
+        const saved = localStorage.getItem('autolog_data');
+        setData(saved ? JSON.parse(saved) : INITIAL_DATA);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   const selectedVehicle = useMemo(() => 
     data.vehicles.find(v => v.id === selectedVehicleId) || null,
   [data.vehicles, selectedVehicleId]);
+
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.error("Sign in failed:", err);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error("Sign out failed:", err);
+    }
+  };
+
+  const renderAuthBlock = (isMobile: boolean = false) => {
+    if (loadingCloud) {
+      return (
+        <div className={cn(
+          "p-4 bg-slate-50/50 rounded-2xl border border-slate-100/60 flex items-center justify-center gap-3",
+          isMobile ? "mt-4" : ""
+        )}>
+          <RefreshCw className="w-4 h-4 text-brand animate-spin" />
+          <span className="text-xs font-bold text-slate-500">جاري الاتصال السحابي...</span>
+        </div>
+      );
+    }
+
+    if (currentUser) {
+      return (
+        <div className={cn(
+          "p-4 bg-emerald-50/30 rounded-2xl border border-emerald-100/50 flex flex-col gap-3",
+          isMobile ? "mt-4" : "mb-3"
+        )}>
+          <div className="flex items-center gap-3">
+            {currentUser.photoURL ? (
+              <img 
+                src={currentUser.photoURL} 
+                alt="Avatar" 
+                className="w-10 h-10 rounded-full border border-emerald-100 shrink-0"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center font-black text-emerald-700 text-sm shrink-0">
+                {currentUser.displayName?.charAt(0) || 'U'}
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-black text-slate-800 truncate leading-tight">{currentUser.displayName || 'مستقبل الخدمة'}</p>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <Cloud className="w-3 h-3 text-emerald-600 shrink-0" />
+                <span className="text-[9px] text-emerald-700 font-extrabold leading-none">مزامنة نشطة</span>
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleSignOut}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-white hover:bg-slate-50/80 active:bg-slate-100 border border-slate-200 rounded-xl text-[10px] font-black text-slate-600 hover:text-slate-800 transition-all cursor-pointer shadow-sm shrink-0"
+          >
+            <LogOut className="w-3.5 h-3.5 text-slate-400" />
+            تسجيل الخروج
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className={cn(
+        "p-4 bg-blue-50/20 rounded-2xl border border-blue-50/80 flex flex-col gap-2.5",
+        isMobile ? "mt-4" : "mb-3"
+      )}>
+        <p className="text-[10px] text-slate-400 font-extrabold leading-relaxed text-right">
+          احفظ بيانات مركباتك وسجلات صيانتها بأمان سحابياً للوصول إليها من أي جهاز.
+        </p>
+        <button
+          onClick={handleSignIn}
+          className="w-full flex items-center justify-center gap-2.5 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-xl text-xs font-black transition-all cursor-pointer shadow-sm shadow-blue-500/10 shrink-0"
+        >
+          <LogIn className="w-4 h-4 text-white/95" />
+          المزامنة مع Google
+        </button>
+      </div>
+    );
+  };
 
   // Derived Statistics
   const stats = useMemo(() => {
@@ -410,71 +893,145 @@ export default function App() {
     });
   }, [data.fuelRecords, data.vehicles, fuelSort, fuelFilter]);
 
-  const addVehicle = (vehicle: Omit<Vehicle, 'id'>) => {
+  const addVehicle = async (vehicle: Omit<Vehicle, 'id'>) => {
     const newVehicle = { ...vehicle, id: crypto.randomUUID() };
     setData(prev => ({ ...prev, vehicles: [...prev.vehicles, newVehicle] }));
     setIsVehicleModalOpen(false);
+    if (currentUser) {
+      try {
+        await saveVehicle(currentUser.uid, newVehicle);
+      } catch (err) {
+        console.error("Failed to save vehicle to cloud", err);
+      }
+    }
   };
 
-  const addRecord = (record: Omit<MaintenanceRecord, 'id'>) => {
+  const addRecord = async (record: Omit<MaintenanceRecord, 'id'>) => {
     const newRecord = { ...record, id: crypto.randomUUID() };
     setData(prev => ({ ...prev, records: [...prev.records, newRecord] }));
     setIsRecordModalOpen(false);
+    if (currentUser) {
+      try {
+        await saveMaintenanceRecord(currentUser.uid, newRecord);
+      } catch (err) {
+        console.error("Failed to save maintenance record to cloud", err);
+      }
+    }
   };
 
-  const addExpense = (expense: Omit<Expense, 'id'>) => {
+  const addExpense = async (expense: Omit<Expense, 'id'>) => {
     const newExpense = { ...expense, id: crypto.randomUUID() };
     setData(prev => ({ ...prev, expenses: [...prev.expenses, newExpense] }));
     setIsExpenseModalOpen(false);
+    if (currentUser) {
+      try {
+        await saveExpense(currentUser.uid, newExpense);
+      } catch (err) {
+        console.error("Failed to save expense to cloud", err);
+      }
+    }
   };
 
-  const addFuelRecord = (record: Omit<FuelRecord, 'id'>) => {
+  const addFuelRecord = async (record: Omit<FuelRecord, 'id'>) => {
     const newRecord = { ...record, id: crypto.randomUUID() };
-    setData(prev => ({ 
-      ...prev, 
-      fuelRecords: [...(prev.fuelRecords || []), newRecord],
-      vehicles: prev.vehicles.map(v => v.id === record.vehicleId ? { ...v, currentOdometer: Math.max(v.currentOdometer, record.odometer) } : v)
-    }));
+    setData(prev => {
+      const updatedVehicles = prev.vehicles.map(v => v.id === record.vehicleId ? { ...v, currentOdometer: Math.max(v.currentOdometer, record.odometer) } : v);
+      if (currentUser) {
+        saveFuelRecord(currentUser.uid, newRecord).catch(err => console.error(err));
+        const updatedVehicle = updatedVehicles.find(v => v.id === record.vehicleId);
+        if (updatedVehicle) {
+          saveVehicle(currentUser.uid, updatedVehicle).catch(err => console.error(err));
+        }
+      }
+      return { 
+        ...prev, 
+        fuelRecords: [...(prev.fuelRecords || []), newRecord],
+        vehicles: updatedVehicles
+      };
+    });
     setIsFuelModalOpen(false);
   };
 
-  const addReminder = (reminder: Omit<MaintenanceReminder, 'id' | 'isCompleted'>) => {
+  const addReminder = async (reminder: Omit<MaintenanceReminder, 'id' | 'isCompleted'>) => {
     const newReminder = { ...reminder, id: crypto.randomUUID(), isCompleted: false };
     setData(prev => ({ ...prev, reminders: [...(prev.reminders || []), newReminder] }));
     setIsReminderModalOpen(false);
+    if (currentUser) {
+      try {
+        await saveMaintenanceReminder(currentUser.uid, newReminder);
+      } catch (err) {
+        console.error("Failed to save reminder to cloud", err);
+      }
+    }
   };
 
-  const toggleReminder = (id: string) => {
-    setData(prev => ({
-      ...prev,
-      reminders: (prev.reminders || []).map(r => r.id === id ? { ...r, isCompleted: !r.isCompleted } : r)
-    }));
+  const toggleReminder = async (id: string) => {
+    setData(prev => {
+      const updatedReminders = (prev.reminders || []).map(r => r.id === id ? { ...r, isCompleted: !r.isCompleted } : r);
+      if (currentUser) {
+        const item = updatedReminders.find(r => r.id === id);
+        if (item) {
+          saveMaintenanceReminder(currentUser.uid, item).catch(err => console.error(err));
+        }
+      }
+      return {
+        ...prev,
+        reminders: updatedReminders
+      };
+    });
   };
 
-  const deleteReminder = (id: string) => {
+  const deleteReminder = async (id: string) => {
     setData(prev => ({
       ...prev,
       reminders: (prev.reminders || []).filter(r => r.id !== id)
     }));
+    if (currentUser) {
+      try {
+        await deleteMaintenanceReminder(currentUser.uid, id);
+      } catch (err) {
+        console.error("Failed to delete reminder from cloud", err);
+      }
+    }
   };
 
-  const addBreakdown = (breakdown: Omit<Breakdown, 'id'>) => {
+  const addBreakdown = async (breakdown: Omit<Breakdown, 'id'>) => {
     const newBreakdown = { ...breakdown, id: crypto.randomUUID() };
     setData(prev => ({ ...prev, breakdowns: [...(prev.breakdowns || []), newBreakdown] }));
     setIsBreakdownModalOpen(false);
+    if (currentUser) {
+      try {
+        await saveBreakdown(currentUser.uid, newBreakdown);
+      } catch (err) {
+        console.error("Failed to save breakdown to cloud", err);
+      }
+    }
   };
 
-  const deleteBreakdown = (id: string) => {
+  const deleteBreakdown = async (id: string) => {
     if (confirm('هل أنت متأكد من حذف سجل العطل هذا؟')) {
       setData(prev => ({
         ...prev,
         breakdowns: (prev.breakdowns || []).filter(b => b.id !== id)
       }));
+      if (currentUser) {
+        try {
+          await deleteBreakdownCloud(currentUser.uid, id);
+        } catch (err) {
+          console.error("Failed to delete breakdown from cloud", err);
+        }
+      }
     }
   };
 
-  const deleteVehicle = (id: string) => {
+  const deleteVehicle = async (id: string) => {
     if (confirm('هل أنت متأكد من حذف هذه المركبة وكل سجلاتها؟ / Are you sure you want to delete this vehicle and all its records?')) {
+      const recordIds = data.records.filter(r => r.vehicleId === id).map(r => r.id);
+      const expenseIds = data.expenses.filter(e => e.vehicleId === id).map(e => e.id);
+      const fuelRecordIds = (data.fuelRecords || []).filter(f => f.vehicleId === id).map(f => f.id);
+      const reminderIds = (data.reminders || []).filter(r => r.vehicleId === id).map(r => r.id);
+      const breakdownIds = (data.breakdowns || []).filter(b => b.vehicleId === id).map(b => b.id);
+
       setData(prev => ({
         vehicles: prev.vehicles.filter(v => v.id !== id),
         records: prev.records.filter(r => r.vehicleId !== id),
@@ -484,6 +1041,20 @@ export default function App() {
         breakdowns: (prev.breakdowns || []).filter(b => b.vehicleId !== id),
       }));
       if (selectedVehicleId === id) setSelectedVehicleId(null);
+
+      if (currentUser) {
+        try {
+          await deleteVehicleAndAllDependencies(currentUser.uid, id, {
+            recordIds,
+            expenseIds,
+            fuelRecordIds,
+            reminderIds,
+            breakdownIds
+          });
+        } catch (err) {
+          console.error("Failed to delete vehicle and dependencies from cloud", err);
+        }
+      }
     }
   };
 
@@ -536,6 +1107,18 @@ export default function App() {
     navigator.clipboard.writeText(url);
     alert('تم نسخ رابط التقرير إلى الحافظة');
   };
+
+  if (showLanding) {
+    return (
+      <LandingPage 
+        onEnterApp={() => {
+          setShowLanding(false);
+          localStorage.setItem('autolog_show_landing', JSON.stringify(false));
+        }}
+        vehiclesCount={data.vehicles.length}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 flex font-sans text-gray-900" dir="rtl">
@@ -617,18 +1200,145 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
-      {/* Sidebar */}
-      <aside className="w-72 bg-white border-l border-border-main hidden md:flex flex-col z-10">
+      {/* Mobile Drawer Navigation */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <div className="fixed inset-0 z-50 md:hidden">
+            {/* Backdrop */}
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="absolute inset-0 bg-slate-950/40 backdrop-blur-[2px]"
+            />
+            
+            {/* Nav Drawer Content */}
+            <motion.aside 
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "spring", bounce: 0, duration: 0.35 }}
+              className="absolute top-0 right-0 h-full w-72 bg-white border-l border-slate-100 flex flex-col shadow-2xl z-50 text-right"
+            >
+              {/* Drawer Header */}
+              <div className="p-6 border-b border-slate-50 flex items-center justify-between">
+                <div className="flex items-center gap-3 text-blue-600">
+                  <div className="w-10 h-10 bg-gradient-to-tr from-blue-700 to-blue-500 rounded-xl shadow-md flex items-center justify-center">
+                    <Car className="w-5.5 h-5.5 text-white" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-base font-black tracking-tight text-slate-800 leading-tight">أوتو كير</span>
+                    <span className="text-[9px] text-slate-400 font-bold leading-none mt-1">خدمة المركبات المتكاملة</span>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="p-1.5 hover:bg-slate-50 rounded-lg text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Drawer Links */}
+              <nav className="flex-1 p-6 space-y-6 overflow-y-auto custom-scrollbar">
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-4 px-3">القائمة الرئيسية</p>
+                  <div className="space-y-1">
+                    {[
+                      { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard },
+                      { id: 'vehicles', label: 'المركبات المضافة', icon: Car },
+                      { id: 'records', label: 'سجلات الصيانة', icon: Wrench },
+                      { id: 'expenses', label: 'المصاريف والفواتير', icon: CreditCard },
+                      { id: 'fuel', label: 'سجل الوقود', icon: Fuel },
+                      { id: 'reports', label: 'التقارير المالية', icon: FileText },
+                      { id: 'compare', label: 'مقارنة المركبات', icon: GitCompare },
+                      { id: 'breakdowns', label: 'سجل الأعطال', icon: AlertTriangle },
+                      { id: 'contacts', label: 'جهات الاتصال', icon: Users },
+                      { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
+                    ].map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setActiveView(item.id as View);
+                          setIsMobileMenuOpen(false);
+                        }}
+                        className={cn(
+                          "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black transition-all cursor-pointer border",
+                          activeView === item.id 
+                            ? "bg-blue-55/40 border-blue-100/60 text-blue-600 shadow-[0_2px_8px_-3px_rgba(37,99,235,0.08)] font-black" 
+                            : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                        )}
+                      >
+                        <item.icon className={cn("w-5 h-5 transition-colors", activeView === item.id ? "text-blue-600" : "text-slate-400")} />
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-4 px-3">الإعدادات والمساعدة</p>
+                   <div className="space-y-1">
+                      <button 
+                        onClick={() => {
+                          setActiveView('settings');
+                          setIsMobileMenuOpen(false);
+                        }}
+                        className={cn(
+                          "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black transition-all cursor-pointer border",
+                          activeView === 'settings' 
+                            ? "bg-blue-55/40 border-blue-100/60 text-blue-600 shadow-[0_2px_8px_-3px_rgba(37,99,235,0.08)]" 
+                            : "border-transparent text-slate-500 hover:bg-slate-50"
+                        )}
+                      >
+                        <Settings className={cn("w-5 h-5 transition-colors", activeView === 'settings' ? "text-blue-600" : "text-slate-400")} />
+                        المظهر والإعدادات
+                      </button>
+
+                      <button 
+                        onClick={() => {
+                          setShowLanding(true);
+                          setIsMobileMenuOpen(false);
+                        }}
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black text-slate-500 hover:bg-slate-50 cursor-pointer border border-transparent"
+                      >
+                        <Globe className="w-5 h-5 text-slate-400" />
+                        صفحة الهبوط (تعريف بالخدمة)
+                      </button>
+                   </div>
+                </div>
+              </nav>
+
+              <div className="p-6 border-t border-slate-50 space-y-4">
+                {renderAuthBlock(true)}
+                <div className="p-4 bg-slate-50/50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] text-slate-400 font-extrabold uppercase mb-1">أسطول المركبات</p>
+                  <p className="text-lg font-black text-slate-800">{data.vehicles.length}</p>
+                </div>
+              </div>
+            </motion.aside>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Desktop Sidebar */}
+      <aside className="w-72 bg-white border-l border-slate-100 hidden md:flex flex-col z-10">
         <div className="p-8">
-          <div className="flex items-center gap-3 text-brand">
-            <div className="w-8 h-8 bg-brand rounded-lg shadow-sm" />
-            <span className="text-xl font-bold tracking-tight">أوتو كير</span>
+          <div className="flex items-center gap-3 text-blue-600">
+            <div className="w-10 h-10 bg-gradient-to-tr from-blue-700 to-blue-500 rounded-xl shadow-md flex items-center justify-center">
+              <Car className="w-5.5 h-5.5 text-white" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-base font-black tracking-tight text-slate-800 leading-tight">أوتو كير</span>
+              <span className="text-[10px] text-slate-400 font-bold leading-none mt-1">خدمة المركبات المتكاملة</span>
+            </div>
           </div>
         </div>
 
-        <nav className="flex-1 p-6 space-y-6">
+        <nav className="flex-1 p-6 space-y-6 overflow-y-auto custom-scrollbar">
           <div>
-            <p className="text-[11px] font-bold text-text-muted uppercase tracking-wider mb-4 px-4">القائمة الرئيسية</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-4 px-4">القائمة الرئيسية</p>
             <div className="space-y-1">
               {[
                 { id: 'dashboard', label: 'لوحة التحكم', icon: LayoutDashboard },
@@ -639,19 +1349,20 @@ export default function App() {
                 { id: 'reports', label: 'التقارير المالية', icon: FileText },
                 { id: 'compare', label: 'مقارنة المركبات', icon: GitCompare },
                 { id: 'breakdowns', label: 'سجل الأعطال', icon: AlertTriangle },
+                { id: 'contacts', label: 'جهات الاتصال', icon: Users },
                 { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
               ].map((item) => (
                 <button
                   key={item.id}
                   onClick={() => setActiveView(item.id as View)}
                   className={cn(
-                    "w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold transition-all group",
+                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black transition-all cursor-pointer border group",
                     activeView === item.id 
-                      ? "bg-[#EBF3FF] text-brand border border-blue-100" 
-                      : "text-text-muted hover:bg-background hover:text-text-main"
+                      ? "bg-blue-50/70 border-blue-100/50 text-blue-600 shadow-[0_2px_8px_-3px_rgba(37,99,235,0.08)]" 
+                      : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
                   )}
                 >
-                  <item.icon className={cn("w-5 h-5 transition-colors", activeView === item.id ? "text-brand" : "text-text-muted group-hover:text-brand")} />
+                  <item.icon className={cn("w-5 h-5 transition-colors duration-200", activeView === item.id ? "text-blue-600" : "text-slate-400 group-hover:text-blue-500")} />
                   {item.label}
                 </button>
               ))}
@@ -659,28 +1370,37 @@ export default function App() {
           </div>
 
           <div>
-             <p className="text-[11px] font-bold text-text-muted uppercase tracking-wider mb-4 px-4">الإعدادات</p>
+             <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-4 px-4">الإعدادات والمساعدة</p>
              <div className="space-y-1">
                 <button 
                   onClick={() => setActiveView('settings')}
                   className={cn(
-                    "w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold transition-all group",
+                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black transition-all cursor-pointer border group",
                     activeView === 'settings' 
-                      ? "bg-[#EBF3FF] text-brand border border-blue-100" 
-                      : "text-text-muted hover:bg-background hover:text-text-main"
+                      ? "bg-blue-50/70 border-blue-100/50 text-blue-600 shadow-[0_2px_8px_-3px_rgba(37,99,235,0.08)]" 
+                      : "border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-800"
                   )}
                 >
-                  <Settings className={cn("w-5 h-5 transition-colors", activeView === 'settings' ? "text-brand" : "text-text-muted group-hover:text-brand")} />
+                  <Settings className={cn("w-5 h-5 transition-colors duration-200", activeView === 'settings' ? "text-blue-600" : "text-slate-400 group-hover:text-blue-500")} />
                   المظهر والإعدادات
+                </button>
+
+                <button 
+                  onClick={() => setShowLanding(true)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-black text-slate-500 hover:bg-slate-50 cursor-pointer border border-transparent group"
+                >
+                  <Globe className="w-5 h-5 text-slate-400 group-hover:text-blue-500 transition-colors" />
+                  صفحة الهبوط (تعريف بالخدمة)
                 </button>
              </div>
           </div>
         </nav>
 
-        <div className="p-6 border-t border-border-main">
-          <div className="p-4 bg-background rounded-xl border border-border-main">
-            <p className="text-[11px] text-text-muted font-bold uppercase mb-1">أسطول المركبات</p>
-            <p className="text-xl font-bold text-text-main">{data.vehicles.length}</p>
+        <div className="p-6 border-t border-slate-50 space-y-4">
+          {renderAuthBlock(false)}
+          <div className="p-4 bg-slate-50/40 rounded-2xl border border-slate-100/60">
+            <p className="text-[10px] text-slate-400 font-extrabold uppercase mb-1">أسطول المركبات</p>
+            <p className="text-xl font-black text-slate-800">{data.vehicles.length}</p>
           </div>
         </div>
       </aside>
@@ -688,23 +1408,34 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col h-screen overflow-hidden bg-background">
         {/* Header */}
-        <header className="h-20 bg-white border-b border-border-main flex items-center justify-between px-8 shrink-0">
-          <div className="flex flex-col">
-            <h1 className="text-xl font-bold text-text-main">
-              {activeView === 'dashboard' && 'لوحة التحكم المركزية'}
-              {activeView === 'vehicles' && 'إدارة المركبات'}
-              {activeView === 'records' && 'سجل الصيانة'}
-              {activeView === 'expenses' && 'إدارة الفواتير'}
-              {activeView === 'fuel' && 'سجل الوقود والاستهلاك'}
-              {activeView === 'reports' && 'توليد التقارير'}
-              {activeView === 'compare' && 'مقارنة أداء السيارات'}
-              {activeView === 'breakdowns' && 'سجل الأعطال والإصلاحات'}
-              {activeView === 'settings' && 'الإعدادات والمظهر'}
-              {activeView === 'ai-assistant' && 'المساعد الذكي (AI)'}
-            </h1>
-            {selectedVehicle && (
-              <p className="text-xs text-text-muted font-medium">المركبة الحالية: {selectedVehicle.make} {selectedVehicle.model}</p>
-            )}
+        <header className="h-20 bg-white border-b border-slate-100 flex items-center justify-between px-4 md:px-8 shrink-0">
+          <div className="flex items-center gap-3">
+            {/* Hamburger Button for Mobile */}
+            <button
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="p-2 -mr-1 hover:bg-slate-50 md:hidden rounded-lg text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+              title="القائمة"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <div className="flex flex-col">
+              <h1 className="text-sm md:text-base font-black text-slate-800 leading-tight">
+                {activeView === 'dashboard' && 'لوحة التحكم المركزية'}
+                {activeView === 'vehicles' && 'إدارة المركبات'}
+                {activeView === 'records' && 'سجل الصيانة'}
+                {activeView === 'expenses' && 'إدارة الفواتير'}
+                {activeView === 'fuel' && 'سجل الوقود والاستهلاك'}
+                {activeView === 'reports' && 'توليد التقارير'}
+                {activeView === 'compare' && 'مقارنة أداء السيارات'}
+                {activeView === 'breakdowns' && 'سجل الأعطال والإصلاحات'}
+                {activeView === 'settings' && 'الإعدادات والمظهر'}
+                {activeView === 'ai-assistant' && 'المساعد الذكي (AI)'}
+                {activeView === 'contacts' && 'جهات اتصال Google'}
+              </h1>
+              {selectedVehicle && (
+                <p className="text-[10px] text-slate-400 font-bold mt-0.5">المركبة الحالية: {selectedVehicle.make} {selectedVehicle.model}</p>
+              )}
+            </div>
           </div>
 
           <div className="flex gap-3 print:hidden">
@@ -738,6 +1469,12 @@ export default function App() {
                 تسجيل عطل
               </Button>
             )}
+            {activeView === 'contacts' && gAccessToken && (
+              <Button onClick={() => setIsCreateContactModalOpen(true)}>
+                <Plus className="w-4 h-4" />
+                إضافة جهة اتصال
+              </Button>
+            )}
           </div>
         </header>
 
@@ -752,13 +1489,13 @@ export default function App() {
                     label="إجمالي الإنفاق" 
                     value={formatCurrency(stats.totalSpend)} 
                     icon={TrendingUp} 
-                    color="blue" 
+                    color="green" 
                   />
                   <StatCard 
                     label="العمليات النشطة" 
                     value={stats.maintCount.toString()} 
                     icon={Wrench} 
-                    color="blue" 
+                    color="orange" 
                   />
                   <StatCard 
                     label="أسطول المركبات" 
@@ -777,7 +1514,7 @@ export default function App() {
                       return (liters / (dist / 100)).toFixed(1) + ' لتر/100كم';
                     })()} 
                     icon={Fuel} 
-                    color="blue" 
+                    color="purple" 
                   />
                 </div>
 
@@ -969,6 +1706,22 @@ export default function App() {
                           )}
                         </span>
                       </div>
+                      {vehicle.driverName && (
+                        <>
+                          <div className="h-px bg-border-main" />
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="font-bold text-text-muted uppercase text-[10px]">السائق المفوّض</span>
+                            <div className="flex flex-col items-end">
+                              <span className="font-bold text-text-main text-xs">{vehicle.driverName}</span>
+                              {vehicle.driverPhone && (
+                                <a href={`tel:${vehicle.driverPhone}`} className="text-[10px] text-blue-600 hover:underline mt-0.5">
+                                  {vehicle.driverPhone}
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     <Button variant="outline" className="w-full text-xs" onClick={() => {
@@ -1180,10 +1933,17 @@ export default function App() {
                     const amount = data.expenses
                       .filter(e => e.category === key)
                       .reduce((s, e) => s + e.amount, 0);
+                    const ExpenseIcon = ({
+                      Fuel,
+                      ShieldCheck,
+                      FileText,
+                      Waves,
+                      CreditCard
+                    } as any)[category.icon] || CreditCard;
                     return (
                       <div key={key} className="bg-white border border-border-main p-5 rounded-xl">
                         <div className="flex items-center gap-3 mb-3">
-                           <category.icon className="w-4 h-4 text-text-muted" />
+                           <ExpenseIcon className="w-4 h-4 text-text-muted" />
                            <span className="text-[10px] font-bold text-text-muted uppercase">{category.label}</span>
                         </div>
                         <p className="text-lg font-bold text-text-main">{formatCurrency(amount)}</p>
@@ -1297,12 +2057,211 @@ export default function App() {
                        />
                     </div>
                   </div>
-                  <div className="mt-8 flex justify-end gap-3">
-                     <Button variant="outline" onClick={() => window.print()} className="flex items-center gap-2">
-                        <Printer className="w-4 h-4" />
-                        طباعة / PDF
-                     </Button>
+                  <div className="mt-8 pt-6 border-t border-border-main flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                     <div className="flex items-center gap-3">
+                        {googleUser ? (
+                           <div className="flex items-center gap-3 bg-[#EAF7ED] text-green-800 px-4 py-2 rounded-xl text-xs font-semibold border border-green-200">
+                             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                             <span>متصل بـ Google: {googleUser.email}</span>
+                             <button onClick={handleGoogleSignOut} className="text-red-600 hover:text-red-800 font-bold underline cursor-pointer mr-2">
+                               قطع الاتصال
+                             </button>
+                           </div>
+                        ) : (
+                           <button 
+                             onClick={handleGoogleSignIn}
+                             className="flex items-center gap-3 cursor-pointer border border-[#D2D6DC] hover:bg-[#F3F4F6] transition-colors rounded-xl px-4 py-2.5 bg-white shadow-sm"
+                           >
+                             <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-4 h-4">
+                               <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                               <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                               <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                               <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                             </svg>
+                             <span className="text-xs font-semibold text-text-main">ربط حساب Google</span>
+                           </button>
+                        )}
+
+                        {exportSuccessUrl && (
+                           <a 
+                             href={exportSuccessUrl} 
+                             target="_blank" 
+                             rel="noopener noreferrer" 
+                             className="flex items-center gap-1.5 bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md animate-bounce"
+                           >
+                             <ExternalLink className="w-3.5 h-3.5" />
+                             فتح ملف Google Sheets 💚
+                           </a>
+                        )}
+
+                        {exportDocsSuccessUrl && (
+                           <a 
+                             href={exportDocsSuccessUrl} 
+                             target="_blank" 
+                             rel="noopener noreferrer" 
+                             className="flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-md animate-bounce"
+                           >
+                             <ExternalLink className="w-3.5 h-3.5" />
+                             فتح ملف Google Docs 💙
+                           </a>
+                        )}
+                     </div>
+
+                     <div className="flex gap-3 items-center">
+                        {googleUser && (
+                           <>
+                             <Button 
+                               onClick={handleSheetsExport} 
+                               disabled={isExportingSheets}
+                               className="flex items-center gap-2 bg-[#0F9D58] hover:bg-[#0B8043] border border-[#0F9D58]"
+                             >
+                               <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                                  <path fill="none" d="M0 0h24v24H0z"/>
+                                  <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10H7v-2h10v2z"/>
+                               </svg>
+                               {isExportingSheets ? 'جاري تصدير Sheets...' : 'تصدير إلى Google Sheets'}
+                             </Button>
+
+                             <Button 
+                               onClick={handleDocsExport} 
+                               disabled={isExportingDocs}
+                               className="flex items-center gap-2 bg-[#4285F4] hover:bg-[#357AE8] border border-[#4285F4]"
+                             >
+                               <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                                 <path fill="none" d="M0 0h24v24H0z"/>
+                                 <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+                               </svg>
+                               {isExportingDocs ? 'جاري تصدير Docs...' : 'تصدير إلى Google Docs'}
+                             </Button>
+                           </>
+                        )}
+                        
+                        <Button variant="outline" onClick={() => window.print()} className="flex items-center gap-2">
+                           <Printer className="w-4 h-4" />
+                           طباعة / PDF
+                        </Button>
+                     </div>
                   </div>
+
+                  {exportError && (
+                     <div className="mt-4 p-3.5 bg-red-50 text-red-700 text-xs rounded-xl font-bold border border-red-200">
+                        ⚠️ {exportError}
+                     </div>
+                  )}
+                </Card>
+
+                {/* Google Forms Integration Card */}
+                <Card className="mt-6 border border-border-main p-6 shadow-sm">
+                   <div className="flex items-center gap-3 mb-4">
+                      <div className="w-10 h-10 bg-purple-50 rounded-xl text-purple-700 flex items-center justify-center border border-purple-100 shrink-0">
+                         <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor">
+                           <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 15H7v-2h10v2zm0-4H7v-2h10v2zm0-4H7V8h10v2z"/>
+                         </svg>
+                      </div>
+                      <div>
+                         <h3 className="text-base font-extrabold text-text-main flex items-center gap-1.5">
+                           توليد وربط نماذج Google Forms 📑
+                         </h3>
+                         <p className="text-xs text-text-muted font-bold mt-0.5">أنشئ استمارات فحص دورية لسياراتك أو استبيانات صيانة وتابع الردود مباشرة على حسابك.</p>
+                      </div>
+                   </div>
+
+                   {/* Grid inside card */}
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                     {/* Subsection 1: Vehicle Inspection checklist */}
+                     <div className="bg-slate-50/50 p-4 rounded-2xl border border-gray-100 flex flex-col justify-between space-y-3">
+                       <div className="space-y-1">
+                         <h4 className="text-xs font-black text-slate-800">1. استمارة فحص جاهزية المركبة الدوري</h4>
+                         <p className="text-[11px] text-text-muted leading-relaxed font-bold">نموذج مخصص لكل سيارة لمراقبة مستويات الزيت، سلامة الفرامل، لمبات الأعطال، والكيلومترات.</p>
+                       </div>
+
+                       <div className="space-y-3">
+                         <div>
+                           <label className="block text-[10px] font-black text-slate-500 mb-1.5">اختر السيارة المستهدفة بالفحص:</label>
+                           <select 
+                             value={formsVehicleId} 
+                             onChange={(e) => setFormsVehicleId(e.target.value)}
+                             className="w-full text-xs p-2.5 bg-white border border-gray-200 rounded-lg outline-none cursor-pointer focus:border-brand transition-colors font-semibold"
+                           >
+                             {data.vehicles.map(v => (
+                               <option key={v.id} value={v.id}>
+                                 {v.make} {v.model} ({v.plateNumber || 'بدون لوحة'})
+                               </option>
+                             ))}
+                           </select>
+                         </div>
+
+                         <Button 
+                           onClick={handleCreateInspectionForm}
+                           disabled={isCreatingForm || data.vehicles.length === 0}
+                           className="w-full text-xs font-extrabold flex items-center justify-center gap-1.5 bg-purple-600 hover:bg-purple-700 border border-purple-600 text-white"
+                         >
+                           {isCreatingForm ? 'جاري التوليد...' : 'توليد ونشر نموذج فحص 📋'}
+                         </Button>
+                       </div>
+                     </div>
+
+                     {/* Subsection 2: Workshop Evaluation Feedback Survey */}
+                     <div className="bg-slate-50/50 p-4 rounded-2xl border border-gray-100 flex flex-col justify-between space-y-3">
+                       <div className="space-y-1">
+                         <h4 className="text-xs font-black text-slate-800">2. استبيان تقييم جودة الورشة والمصداقية</h4>
+                         <p className="text-[11px] text-text-muted leading-relaxed font-bold font-semibold">استبيان شامل لتقييم كفاءة الورشة، ملائمة الأسعار، واستخدام خصومات "أوتو كير".</p>
+                       </div>
+
+                       <div className="pt-2">
+                         <Button 
+                           onClick={handleCreateFeedbackSurvey}
+                           disabled={isCreatingForm}
+                           className="w-full text-xs font-extrabold flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 border border-indigo-600 text-white mt-auto"
+                         >
+                           {isCreatingForm ? 'جاري التوليد...' : 'توليد استبيان تقييم الورش ومستوى الخدمة 🖊️'}
+                         </Button>
+                       </div>
+                     </div>
+                   </div>
+
+                   {/* Forms Link feedback results */}
+                   {formSuccessUrl && (
+                     <div className="mt-5 p-4 bg-purple-50/80 border border-purple-100 rounded-2xl space-y-2 text-right">
+                       <div className="flex items-center gap-2">
+                         <div className="w-2 h-2 rounded-full bg-purple-600 animate-pulse"></div>
+                         <p className="text-xs font-black text-purple-950">
+                           🎉 تم إنشاء نموذج Google Form بنجاح في حسابك المرتبط!
+                         </p>
+                       </div>
+                       
+                       <p className="text-[11px] text-purple-800 font-bold leading-relaxed">
+                         {formTypeCreated === 'inspection' 
+                           ? `بإمكانك الآن فتح واجهة التعديل وإعدادات النموذج المخصص لفحص سيارتك، أو مشاركة رابط ملء الاستمارة المباشر مع عمال الصيانة أو السائقين لحفظ وتكشيف حالة السيارة في حساب Google Drive الخاص بك.`
+                           : `تم تفعيل وتجهيز استبيان تقييم الورشة بنجاح. شارك الرابط مع فريق عملك أو العملاء لمراجعة رضاهم عن الصيانة.`
+                         }
+                       </p>
+
+                       <div className="flex items-center gap-3 pt-2 text-xs flex-wrap">
+                         <a 
+                           href={formSuccessUrl} 
+                           target="_blank" 
+                           rel="noopener noreferrer" 
+                           className="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white font-extrabold px-4 py-2 rounded-xl transition-all shadow-sm"
+                         >
+                           <ExternalLink className="w-3.5 h-3.5" />
+                           فتح النموذج للتعديل (Google Forms) 🛠️
+                         </a>
+                         
+                         {formResponderUrl && (
+                           <a 
+                             href={formResponderUrl} 
+                             target="_blank" 
+                             rel="noopener noreferrer" 
+                             className="flex items-center gap-1.5 bg-white hover:bg-slate-50 border border-purple-200 text-purple-700 font-extrabold px-4 py-2 rounded-xl transition-all shadow-sm"
+                           >
+                             <ExternalLink className="w-3.5 h-3.5" />
+                             عرض ورابط المشاركة العام للملء 👁️
+                           </a>
+                         )}
+                       </div>
+                     </div>
+                   )}
                 </Card>
 
                 {/* Report Preview */}
@@ -1881,7 +2840,7 @@ export default function App() {
                     label="إجمالي تكاليف الإصلاح" 
                     value={formatCurrency(baseFilteredBreakdowns.reduce((s, b) => s + b.cost, 0))} 
                     icon={CreditCard} 
-                    color="orange" 
+                    color="green" 
                   />
                   <StatCard 
                     label="أكثر الأعطال شيوعاً" 
@@ -1892,9 +2851,12 @@ export default function App() {
                       return top ? BREAKDOWN_CATEGORIES[top[0] as BreakdownCategory].label : '—';
                     })()} 
                     icon={Settings} 
-                    color="orange" 
+                    color="purple" 
                   />
                 </div>
+
+                {/* Nearby Workshops Interactive Map */}
+                <NearbyWorkshopsMap />
 
                 {/* Breakdown Frequency Chart & Summary */}
                 {(data.breakdowns || []).length > 0 && (
@@ -2179,7 +3141,12 @@ export default function App() {
                         {PREDEFINED_THEMES.map((t) => (
                           <button
                             key={t.id}
-                            onClick={() => setData(prev => ({ ...prev, theme: t }))}
+                            onClick={() => {
+                              setData(prev => ({ ...prev, theme: t }));
+                              if (currentUser) {
+                                saveUserProfile(currentUser.uid, currentUser.email || '', t).catch(err => console.error(err));
+                              }
+                            }}
                             className={cn(
                               "flex items-center gap-3 p-3 rounded-xl border transition-all text-right",
                               data.theme?.primary === t.primary 
@@ -2203,13 +3170,17 @@ export default function App() {
                               value={data.theme?.primary || '#0052CC'}
                               onChange={(e) => {
                                 const val = e.target.value;
+                                const newTheme = { 
+                                  primary: val, 
+                                  primaryHover: val // Simplification
+                                };
                                 setData(prev => ({ 
                                   ...prev, 
-                                  theme: { 
-                                    primary: val, 
-                                    primaryHover: val // Simplification
-                                  } 
+                                  theme: newTheme 
                                 }));
+                                if (currentUser) {
+                                  saveUserProfile(currentUser.uid, currentUser.email || '', newTheme).catch(err => console.error(err));
+                                }
                               }}
                               className="absolute inset-x-0 inset-y-0 w-24 h-24 -translate-x-4 -translate-y-4 cursor-pointer"
                            />
@@ -2222,7 +3193,12 @@ export default function App() {
                            <p className="text-xs text-text-muted mt-1">سيتم تطبيق هذا اللون على الأزرار والأيقونات والعناصر النشطة عبر التطبيق.</p>
                         </div>
                         {data.theme && (
-                          <Button variant="ghost" className="text-xs" onClick={() => setData(prev => ({ ...prev, theme: undefined }))}>
+                          <Button variant="ghost" className="text-xs" onClick={() => {
+                            setData(prev => ({ ...prev, theme: undefined }));
+                            if (currentUser) {
+                              saveUserProfile(currentUser.uid, currentUser.email || '', undefined).catch(err => console.error(err));
+                            }
+                          }}>
                             إعادة الضبط
                           </Button>
                         )}
@@ -2250,11 +3226,237 @@ export default function App() {
                 </Card>
               </div>
             )}
+
+            {activeView === 'contacts' && (
+              <div className="space-y-6">
+                {!gAccessToken ? (
+                  <div className="max-w-xl mx-auto py-16 px-4 text-center">
+                    <div className="w-20 h-20 bg-blue-50/50 rounded-full border border-blue-100/60 flex items-center justify-center mx-auto mb-6 text-blue-600 shadow-sm animate-bounce-subtle">
+                      <Users className="w-10 h-10" />
+                    </div>
+                    <h2 className="text-xl font-black text-slate-800">تكامل جهات اتصال Google</h2>
+                    <p className="text-sm text-slate-500 leading-relaxed mt-3 mb-8">
+                      قم بربط وتفويض حساب Google الخاص بك لاستيراد وإدارة جهات الاتصال الخاصة بك مباشرة. يمكنك تعيين جهات الاتصال الخاصة بك كسائقين معتمدين لأسطول مركباتك أو مرجع للورش والخدمات.
+                    </p>
+                    <Button onClick={googleSignIn} className="mx-auto flex items-center gap-2 shadow-md">
+                      <Globe className="w-4 h-4" />
+                      مزامنة جهات الاتصال مع Google
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Contacts List Main Panel */}
+                    <div className="lg:col-span-2 space-y-4">
+                      <div className="flex flex-col md:flex-row gap-4 items-center justify-between pb-4 border-b border-border-main">
+                        <div className="relative w-full md:w-80">
+                          <Search className="absolute right-3 top-3 w-4 h-4 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="البحث في جهات الاتصال..."
+                            value={contactsSearch}
+                            onChange={(e) => setContactsSearch(e.target.value)}
+                            className="w-full pr-10 pl-3 py-2.5 bg-white border border-border-main rounded-xl outline-none text-xs focus:border-brand transition-all font-semibold text-right"
+                          />
+                        </div>
+                        <div className="flex gap-2 items-center">
+                          <span className="text-slate-400 text-[10px] font-black uppercase">
+                            إجمالي المكتشفين: {contacts.length}
+                          </span>
+                          <Button variant="ghost" size="sm" onClick={loadContacts} className="text-slate-400 hover:text-slate-700" disabled={contactsLoading}>
+                            <RefreshCw className={cn("w-4 h-4", contactsLoading ? "animate-spin" : "")} />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {contactsLoading ? (
+                        <div className="py-20 text-center text-slate-400 font-semibold text-xs flex flex-col items-center justify-center gap-2">
+                          <RefreshCw className="w-6 h-6 animate-spin text-brand" />
+                          جاري استرجاع جهات الاتصال من Google...
+                        </div>
+                      ) : contactsError ? (
+                        <div className="p-6 bg-red-50 border border-red-100 rounded-xl text-center text-red-600 text-xs font-semibold">
+                          {contactsError}
+                          <Button size="sm" variant="ghost" onClick={loadContacts} className="mt-3 text-red-700 hover:bg-red-100/50 mx-auto">
+                            إعادة المحاولة
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {contacts
+                            .filter(c => {
+                              const q = contactsSearch.toLowerCase();
+                              return (
+                                c.name.toLowerCase().includes(q) ||
+                                (c.email && c.email.toLowerCase().includes(q)) ||
+                                (c.phoneNumber && c.phoneNumber.includes(q))
+                              );
+                            })
+                            .map(contact => (
+                              <Card key={contact.resourceName} className="relative group/card hover:border-brand/40 transition-all">
+                                <div className="flex items-center gap-4">
+                                  {contact.photoUrl ? (
+                                    <img 
+                                      src={contact.photoUrl} 
+                                      alt={contact.name} 
+                                      referrerPolicy="no-referrer"
+                                      className="w-12 h-12 rounded-full border border-slate-100 object-cover"
+                                    />
+                                  ) : (
+                                    <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center border border-blue-100/40 text-sm font-black uppercase">
+                                      {contact.name.charAt(0)}
+                                    </div>
+                                  )}
+                                  <div className="flex-1 min-w-0 text-right">
+                                    <h4 className="font-extrabold text-xs text-slate-800 truncate">{contact.name}</h4>
+                                    {contact.phoneNumber && (
+                                      <p className="text-[10px] text-slate-500 font-black tracking-wider mt-1 text-left" dir="ltr">
+                                        {contact.phoneNumber}
+                                      </p>
+                                    )}
+                                    {contact.email && (
+                                      <p className="text-[10px] text-slate-400 font-bold truncate mt-0.5 text-left" dir="ltr">
+                                        {contact.email}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex gap-2 justify-end mt-4 pt-3 border-t border-slate-100 flex-row-reverse">
+                                  <Button 
+                                    variant="ghost" 
+                                    size="sm" 
+                                    className="text-red-500 hover:bg-red-50 hover:text-red-700 text-[10px] py-1 px-2.5 h-8 font-black"
+                                    onClick={() => handleDeleteContact(contact.resourceName, contact.name)}
+                                  >
+                                    حذف جهة الاتصال
+                                  </Button>
+                                  {contact.phoneNumber && (
+                                    <a 
+                                      href={`tel:${contact.phoneNumber}`}
+                                      className="inline-flex items-center justify-center px-3 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200/60 rounded-lg text-[10px] font-black h-8 transition-all"
+                                    >
+                                      اتصال هاتفي
+                                    </a>
+                                  )}
+                                </div>
+                              </Card>
+                            ))}
+
+                          {contacts.length === 0 && (
+                            <div className="col-span-full py-16 text-center text-slate-400 font-semibold text-xs border border-dashed border-border-main rounded-xl">
+                              لم يتم العثور على أي جهات اتصال في حساب Google.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Quick creation sidebar form */}
+                    <div className="space-y-6">
+                      <Card title="إضافة سريعة إلى Google" subtitle="سجل جهة اتصال جديدة في مذكرتك السحابية">
+                        <form className="space-y-4" onSubmit={handleCreateContact}>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1.5">الاسم بالكامل (مطلوب)</label>
+                            <input
+                              type="text"
+                              required
+                              value={newContactForm.name}
+                              onChange={(e) => setNewContactForm(prev => ({ ...prev, name: e.target.value }))}
+                              placeholder="مثلاً: الورشة المتخصصة للمكابح"
+                              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-xs transition-all font-semibold text-right"
+                              disabled={isSavingContact}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1.5">رقم الهاتف (اختياري)</label>
+                            <input
+                              type="text"
+                              value={newContactForm.phoneNumber}
+                              onChange={(e) => setNewContactForm(prev => ({ ...prev, phoneNumber: e.target.value }))}
+                              placeholder="+966 50 000 0000"
+                              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-xs transition-all font-semibold text-left"
+                              dir="ltr"
+                              disabled={isSavingContact}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 mb-1.5">البريد الإلكتروني (اختياري)</label>
+                            <input
+                              type="email"
+                              value={newContactForm.email}
+                              onChange={(e) => setNewContactForm(prev => ({ ...prev, email: e.target.value }))}
+                              placeholder="workshop@example.com"
+                              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-xs transition-all font-semibold text-left"
+                              dir="ltr"
+                              disabled={isSavingContact}
+                            />
+                          </div>
+                          <Button type="submit" className="w-full py-2.5 text-xs" disabled={isSavingContact}>
+                            {isSavingContact ? 'جاري الإضافة السحابية...' : 'إضافة إلى جهات اتصال Google'}
+                          </Button>
+                        </form>
+                      </Card>
+
+                      <div className="p-4 bg-blue-50/40 border border-blue-100/50 rounded-xl">
+                        <div className="flex gap-3">
+                          <Users className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                          <div className="text-right">
+                            <h4 className="text-[11px] font-black text-slate-800">مركز التنسيق الموحد</h4>
+                            <p className="text-[10px] text-slate-500 mt-1 leading-relaxed font-semibold">
+                              عند تسجيل جهات اتصال جديدة هنا، ستتم مزامنتها فورياً مع حساب Google الخاص بك (Google Contacts) لتستطيع استخدامها على كافة أجهزتك الذكية وسياراتك بمرونة تامة.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </main>
 
       {/* Modals */}
+      <Modal isOpen={isCreateContactModalOpen} onClose={() => setIsCreateContactModalOpen(false)} title="إضافة جهة اتصال جديدة إلى Google">
+        <form className="space-y-4" onSubmit={handleCreateContact}>
+          <div>
+            <label className="block text-xs font-bold text-text-muted uppercase mb-1.5">الاسم بالكامل (مطلوب)</label>
+            <input 
+              value={newContactForm.name}
+              onChange={(e) => setNewContactForm(prev => ({ ...prev, name: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-sm transition-all" 
+              required 
+              placeholder="مثلاً: المهندس أحمد - ورشة المحرك الذهبي" 
+              disabled={isSavingContact}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-text-muted uppercase mb-1.5">رقم الهاتف (اختياري)</label>
+            <input 
+              value={newContactForm.phoneNumber}
+              onChange={(e) => setNewContactForm(prev => ({ ...prev, phoneNumber: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-sm transition-all text-left" 
+              placeholder="+966 50 123 4567" 
+              disabled={isSavingContact}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-text-muted uppercase mb-1.5">البريد الإلكتروني (اختياري)</label>
+            <input 
+              value={newContactForm.email}
+              onChange={(e) => setNewContactForm(prev => ({ ...prev, email: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-sm transition-all text-left" 
+              placeholder="ahmed@example.com" 
+              disabled={isSavingContact}
+            />
+          </div>
+          <Button className="w-full py-3 mt-4 animate-pulse-subtle" type="submit" disabled={isSavingContact}>
+            {isSavingContact ? 'جاري المزامنة والحفظ...' : 'حفظ ومزامنة جهة الاتصال في Google'}
+          </Button>
+        </form>
+      </Modal>
+
       <Modal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} title="مشاركة سجلات المركبة">
         <div className="space-y-6">
            <p className="text-sm text-text-muted">اختر طريقة مشاركة سجلات الصيانة والمصاريف الخاصة بهذه المركبة:</p>
@@ -2321,12 +3523,23 @@ export default function App() {
         <form className="space-y-4" onSubmit={(e) => {
           e.preventDefault();
           const fd = new FormData(e.currentTarget);
+          const driverVal = fd.get('driverContact') as string;
+          let driverName, driverEmail, driverPhone;
+          if (driverVal) {
+            const parts = driverVal.split('||');
+            driverName = parts[0] || undefined;
+            driverEmail = parts[1] || undefined;
+            driverPhone = parts[2] || undefined;
+          }
           addVehicle({
             make: fd.get('make') as string,
             model: fd.get('model') as string,
             year: Number(fd.get('year')),
             licensePlate: fd.get('licensePlate') as string,
             currentOdometer: Number(fd.get('odometer')),
+            driverName,
+            driverEmail,
+            driverPhone,
           });
         }}>
           <div>
@@ -2351,6 +3564,19 @@ export default function App() {
             <label className="block text-xs font-bold text-text-muted uppercase mb-1.5">قراءة العداد (كم)</label>
             <input name="odometer" type="number" className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg focus:border-brand outline-none text-sm transition-all" required />
           </div>
+          {gAccessToken && contacts.length > 0 && (
+            <div>
+              <label className="block text-xs font-bold text-text-muted uppercase mb-1.5">السائق المسؤول (من جهات اتصال Google)</label>
+              <select name="driverContact" className="w-full p-2.5 bg-[#F9FAFB] border border-border-main rounded-lg outline-none text-sm cursor-pointer focus:border-brand">
+                <option value="">بدون تحديد سائق</option>
+                {contacts.map(c => (
+                  <option key={c.resourceName} value={`${c.name}||${c.email || ''}||${c.phoneNumber || ''}`}>
+                    {c.name} {c.phoneNumber ? `(${c.phoneNumber})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <Button className="w-full py-3 mt-4" type="submit">حفظ المركبة</Button>
         </form>
       </Modal>
@@ -2701,15 +3927,39 @@ function StatCard({ label, value, icon: Icon, color }: {
   icon: React.ElementType; 
   color: 'blue' | 'green' | 'orange' | 'purple';
 }) {
+  const colorMap = {
+    blue: {
+      tag: 'bg-blue-50 text-blue-600 border-blue-100',
+      glow: 'shadow-blue-100/40 hover:shadow-blue-200/50'
+    },
+    green: {
+      tag: 'bg-emerald-50 text-emerald-600 border-emerald-100',
+      glow: 'shadow-emerald-100/40 hover:shadow-emerald-200/50'
+    },
+    orange: {
+      tag: 'bg-amber-50 text-amber-600 border-amber-100',
+      glow: 'shadow-amber-100/40 hover:shadow-amber-200/50'
+    },
+    purple: {
+      tag: 'bg-purple-50 text-purple-600 border-purple-100',
+      glow: 'shadow-purple-100/40 hover:shadow-purple-200/50'
+    }
+  };
+
+  const scheme = colorMap[color] || colorMap.blue;
+
   return (
-    <div className="bg-white border border-border-main p-6 rounded-xl hover:shadow-sm transition-all group">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-[11px] font-bold text-text-muted uppercase tracking-wider mb-2">{label}</p>
-          <h4 className="text-2xl font-bold text-text-main">{value}</h4>
+    <div className={cn(
+      "bg-white border border-slate-100 p-6 rounded-2xl transition-all duration-300 group shadow-[0_1px_3px_0_rgba(15,23,42,0.03),0_1px_2px_0_rgba(15,23,42,0.02)]",
+      "hover:translate-y-[-2px] hover:shadow-[0_12px_24px_-8px_rgba(15,23,42,0.08),0_1px_3px_0_rgba(15,23,42,0.02)]"
+    )}>
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-1">
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{label}</p>
+          <h4 className="text-xl font-black text-slate-800 tracking-tight">{value}</h4>
         </div>
-        <div className="p-3 rounded-lg bg-background text-brand group-hover:bg-[#EBF3FF] transition-colors">
-          <Icon className="w-6 h-6" />
+        <div className={cn("p-3 rounded-xl border shrink-0 transition-colors duration-200", scheme.tag)}>
+          <Icon className="w-5 h-5" />
         </div>
       </div>
     </div>

@@ -1,0 +1,315 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Safety Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- ENTITY VALIDATORS ---
+
+    function isValidUserProfile(data) {
+      return data.userId is string 
+        && data.userId.size() > 0 
+        && data.userId.size() <= 128
+        && data.email is string
+        && data.email.size() > 5
+        && data.email.size() <= 128
+        && (data.theme == null || data.theme is map);
+    }
+
+    function isValidVehicle(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.make is string
+        && data.make.size() > 0
+        && data.make.size() <= 100
+        && data.model is string
+        && data.model.size() > 0
+        && data.model.size() <= 100
+        && data.year is int
+        && data.year >= 1800
+        && data.year <= 2100
+        && data.licensePlate is string
+        && data.licensePlate.size() > 0
+        && data.licensePlate.size() <= 50
+        && data.currentOdometer is int
+        && data.currentOdometer >= 0
+        && (data.color == null || (data.color is string && data.color.size() <= 50));
+    }
+
+    function isValidMaintenanceRecord(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.vehicleId is string
+        && data.vehicleId.size() > 0
+        && data.vehicleId.size() <= 128
+        && data.type is string
+        && (data.type == "oil" || data.type == "tires" || data.type == "brakes" || data.type == "battery" || data.type == "engine" || data.type == "other")
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 200
+        && data.date is string
+        && data.date.size() > 0
+        && data.date.size() <= 50
+        && (data.cost is int || data.cost is float)
+        && data.cost >= 0.0
+        && (data.odometer is int || data.odometer is float)
+        && data.odometer >= 0.0
+        && (data.notes == null || (data.notes is string && data.notes.size() <= 2000));
+    }
+
+    function isValidExpense(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.vehicleId is string
+        && data.vehicleId.size() > 0
+        && data.vehicleId.size() <= 128
+        && data.category is string
+        && (data.category == "fuel" || data.category == "insurance" || data.category == "registration" || data.category == "cleaning" || data.category == "other")
+        && data.date is string
+        && data.date.size() > 0
+        && data.date.size() <= 50
+        && (data.amount is int || data.amount is float)
+        && data.amount >= 0.0
+        && (data.notes == null || (data.notes is string && data.notes.size() <= 2000));
+    }
+
+    function isValidFuelRecord(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.vehicleId is string
+        && data.vehicleId.size() > 0
+        && data.vehicleId.size() <= 128
+        && data.date is string
+        && data.date.size() > 0
+        && data.date.size() <= 50
+        && (data.odometer is int || data.odometer is float)
+        && data.odometer >= 0.0
+        && (data.liters is int || data.liters is float)
+        && data.liters >= 0.0
+        && (data.cost is int || data.cost is float)
+        && data.cost >= 0.0
+        && data.isFullTank is bool
+        && (data.station == null || (data.station is string && data.station.size() <= 200));
+    }
+
+    function isValidMaintenanceReminder(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.vehicleId is string
+        && data.vehicleId.size() > 0
+        && data.vehicleId.size() <= 128
+        && data.type is string
+        && data.type.size() > 0
+        && data.type.size() <= 50
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 200
+        && data.isCompleted is bool
+        && (data.dueDate == null || (data.dueDate is string && data.dueDate.size() <= 50))
+        && (data.dueOdometer == null || data.dueOdometer is int || data.dueOdometer is float);
+    }
+
+    function isValidBreakdown(data) {
+      return data.id is string
+        && data.id.size() > 0
+        && data.id.size() <= 128
+        && data.userId is string
+        && data.userId.size() > 0
+        && data.userId.size() <= 128
+        && data.vehicleId is string
+        && data.vehicleId.size() > 0
+        && data.vehicleId.size() <= 128
+        && data.category is string
+        && data.category.size() > 0
+        && data.category.size() <= 50
+        && data.description is string
+        && data.description.size() > 0
+        && data.description.size() <= 1000
+        && data.date is string
+        && data.date.size() > 0
+        && data.date.size() <= 50
+        && (data.cost is int || data.cost is float)
+        && data.cost >= 0.0
+        && (data.location == null || (data.location is string && data.location.size() <= 200))
+        && (data.repairedAt == null || (data.repairedAt is string && data.repairedAt.size() <= 50))
+        && (data.notes == null || (data.notes is string && data.notes.size() <= 2000));
+    }
+
+    // --- CODES AND PATH MATCH RULES ---
+
+    // 1. Users Profile Collection
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && request.auth.uid == userId;
+      allow create: if isVerifiedUser() 
+        && request.auth.uid == userId 
+        && isValidUserProfile(incoming());
+      allow update: if isVerifiedUser()
+        && request.auth.uid == userId
+        && incoming().userId == existing().userId
+        && isValidUserProfile(incoming());
+      allow delete: if false; // Deletion is disabled for system profile records
+    }
+
+    // 2. Vehicles Collection
+    match /vehicles/{vehicleId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(vehicleId)
+        && incoming().id == vehicleId
+        && incoming().userId == request.auth.uid
+        && isValidVehicle(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && isValidVehicle(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    // Helper to verify that a vehicle actually belongs to the authenticated user
+    function vehicleExistsAndBelongsToUser(vehicleId) {
+      return exists(/databases/$(database)/documents/vehicles/$(vehicleId))
+        && get(/databases/$(database)/documents/vehicles/$(vehicleId)).data.userId == request.auth.uid;
+    }
+
+    // 3. Maintenance Records Collection
+    match /records/{recordId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(recordId)
+        && incoming().id == recordId
+        && incoming().userId == request.auth.uid
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidMaintenanceRecord(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidMaintenanceRecord(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    // 4. Expenses Collection
+    match /expenses/{expenseId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(expenseId)
+        && incoming().id == expenseId
+        && incoming().userId == request.auth.uid
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidExpense(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidExpense(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    // 5. Fuel Records Collection
+    match /fuelRecords/{fuelRecordId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(fuelRecordId)
+        && incoming().id == fuelRecordId
+        && incoming().userId == request.auth.uid
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidFuelRecord(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidFuelRecord(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    // 6. Maintenance Reminders Collection
+    match /reminders/{reminderId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(reminderId)
+        && incoming().id == reminderId
+        && incoming().userId == request.auth.uid
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidMaintenanceReminder(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidMaintenanceReminder(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+
+    // 7. Breakdowns Collection
+    match /breakdowns/{breakdownId} {
+      allow get: if isVerifiedUser() && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(breakdownId)
+        && incoming().id == breakdownId
+        && incoming().userId == request.auth.uid
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidBreakdown(incoming());
+      allow update: if isVerifiedUser()
+        && existing().userId == request.auth.uid
+        && incoming().userId == request.auth.uid
+        && incoming().id == existing().id
+        && vehicleExistsAndBelongsToUser(incoming().vehicleId)
+        && isValidBreakdown(incoming());
+      allow delete: if isVerifiedUser() && existing().userId == request.auth.uid;
+    }
+  }
+}

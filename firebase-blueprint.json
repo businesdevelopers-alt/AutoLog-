@@ -1,0 +1,157 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user settings, preferences and meta info",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The unique user ID" },
+        "email": { "type": "string", "description": "User email address" },
+        "theme": { "type": "object", "description": "App theme colors" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Represents a vehicle managed by the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "make": { "type": "string" },
+        "model": { "type": "string" },
+        "year": { "type": "integer" },
+        "licensePlate": { "type": "string" },
+        "currentOdometer": { "type": "integer" },
+        "color": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "make", "model", "year", "licensePlate", "currentOdometer"]
+    },
+    "MaintenanceRecord": {
+      "title": "Maintenance Record",
+      "description": "Represents a maintenance event for a vehicle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "type": { "type": "string", "enum": ["oil", "tires", "brakes", "battery", "engine", "other"] },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "cost": { "type": "number" },
+        "odometer": { "type": "number" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "vehicleId", "type", "title", "date", "cost", "odometer"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Represents a non-maintenance expense associated with a vehicle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "category": { "type": "string", "enum": ["fuel", "insurance", "registration", "cleaning", "other"] },
+        "date": { "type": "string" },
+        "amount": { "type": "number" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "vehicleId", "category", "date", "amount"]
+    },
+    "FuelRecord": {
+      "title": "Fuel Record",
+      "description": "Represents fuel refill log for a vehicle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "date": { "type": "string" },
+        "odometer": { "type": "number" },
+        "liters": { "type": "number" },
+        "cost": { "type": "number" },
+        "station": { "type": "string" },
+        "isFullTank": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "vehicleId", "date", "odometer", "liters", "cost", "isFullTank"]
+    },
+    "MaintenanceReminder": {
+      "title": "Maintenance Reminder",
+      "description": "Represents service or billing reminder log for a vehicle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "dueOdometer": { "type": "number" },
+        "isCompleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "vehicleId", "type", "title", "isCompleted"]
+    },
+    "Breakdown": {
+      "title": "Breakdown",
+      "description": "Represents breakdown detail log for a vehicle",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "vehicleId": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string" },
+        "cost": { "type": "number" },
+        "location": { "type": "string" },
+        "repairedAt": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "vehicleId", "category", "description", "date", "cost"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User account documents containing settings and profile details"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": "Vehicle",
+      "description": "Root collection of user vehicles, queried list by userId"
+    },
+    "/records/{recordId}": {
+      "schema": "MaintenanceRecord",
+      "description": "Root collection of maintenance logs, queried list by userId"
+    },
+    "/expenses/{expenseId}": {
+      "schema": "Expense",
+      "description": "Root collection of vehicle expense logs, queried list by userId"
+    },
+    "/fuelRecords/{fuelRecordId}": {
+      "schema": "FuelRecord",
+      "description": "Root collection of fuel consumption logs, queried list by userId"
+    },
+    "/reminders/{reminderId}": {
+      "schema": "MaintenanceReminder",
+      "description": "Root collection of maintenance tasks and general reminders, queried list by userId"
+    },
+    "/breakdowns/{breakdownId}": {
+      "schema": "Breakdown",
+      "description": "Root collection of vehicle breakdown and repairs, queried list by userId"
+    }
+  }
+}

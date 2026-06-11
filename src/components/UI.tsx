@@ -15,24 +15,24 @@ export interface CardProps {
 export function Card({ title, subtitle, icon: Icon, extra, className, children, onClick }: CardProps) {
   return (
     <div 
-      className={cn("bg-white border border-border-main rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow", className)} 
+      className={cn("bg-white border border-slate-100 rounded-2xl overflow-hidden shadow-[0_1px_3px_0_rgba(15,23,42,0.03),0_1px_2px_0_rgba(15,23,42,0.02)] hover:shadow-[0_8px_20px_-6px_rgba(15,23,42,0.06),0_1px_3px_0_rgba(15,23,42,0.02)] transition-all duration-300", className)} 
       onClick={onClick}
     >
       {(title || subtitle || Icon || extra) && (
-        <div className="px-6 py-5 border-b border-border-main bg-[#F9FAFB]/50 flex items-center justify-between gap-4">
+        <div className="px-6 py-4.5 border-b border-slate-50 bg-slate-50/40 flex items-center justify-between gap-4">
           <div className="flex items-center gap-4 min-w-0 flex-1">
-            <div className="min-w-0 flex-1">
-              {title && <h3 className="text-base font-bold text-text-main truncate leading-tight">{title}</h3>}
-              {subtitle && <p className="text-xs text-text-muted mt-1 truncate font-medium">{subtitle}</p>}
-            </div>
             {Icon && (
-              <div className="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-white rounded-xl border border-border-main text-brand shadow-sm">
+              <div className="flex-shrink-0 w-10 h-10 flex items-center justify-center bg-white rounded-xl border border-slate-100 text-blue-600 shadow-[0_2px_8px_-3px_rgba(37,99,235,0.12)]">
                 <Icon className="w-5 h-5" />
               </div>
             )}
+            <div className="min-w-0 flex-1">
+              {title && <h3 className="text-sm font-black text-slate-800 tracking-tight leading-tight">{title}</h3>}
+              {subtitle && <p className="text-[10px] text-slate-400 mt-1 truncate font-bold">{subtitle}</p>}
+            </div>
           </div>
           {extra && (
-            <div className="flex items-center gap-3 shrink-0 mr-auto">
+            <div className="flex items-center gap-2 shrink-0 mr-auto">
               {extra}
             </div>
           )}
@@ -68,18 +68,18 @@ export function Button({
   title
 }: ButtonProps) {
   const variants = {
-    primary: 'bg-brand text-white hover:bg-brand-hover',
-    secondary: 'bg-background text-text-main hover:bg-border-main',
-    outline: 'border border-border-main bg-transparent hover:bg-[#F9FAFB] text-text-main',
-    danger: 'bg-[#DE350B] text-white hover:bg-[#BF2600]',
-    ghost: 'bg-transparent hover:bg-background text-text-muted'
+    primary: 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 shadow-[0_2px_10px_-3px_rgba(37,99,235,0.25)] hover:shadow-[0_4px_16px_-4px_rgba(37,99,235,0.35)]',
+    secondary: 'bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-800',
+    outline: 'border border-slate-200/80 bg-white hover:bg-slate-50 hover:border-slate-300 text-slate-700 hover:shadow-sm',
+    danger: 'bg-rose-600 text-white hover:bg-rose-700 active:bg-rose-800 shadow-[0_2px_10px_-3px_rgba(225,29,72,0.25)]',
+    ghost: 'bg-transparent hover:bg-slate-50 hover:text-slate-900 text-slate-500'
   };
 
   const sizes = {
-    sm: 'px-3 py-1.5 text-xs font-semibold rounded',
-    md: 'px-4 py-2 text-sm font-semibold rounded-md',
-    lg: 'px-6 py-3 text-base font-semibold rounded-lg',
-    icon: 'p-2'
+    sm: 'px-3 py-1.5 text-[10px] font-black rounded-lg',
+    md: 'px-4.5 py-2.5 text-xs font-black rounded-xl',
+    lg: 'px-6 py-3.5 text-sm font-black rounded-xl',
+    icon: 'p-2.5 rounded-lg'
   };
 
   return (
@@ -89,7 +89,7 @@ export function Button({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'inline-flex items-center justify-center rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none gap-2',
+        'inline-flex items-center justify-center font-bold tracking-wide transition-all active:scale-[0.98] outline-none disabled:opacity-50 disabled:pointer-events-none disabled:scale-100 cursor-pointer gap-2',
         variants[variant],
         sizes[size],
         className
@@ -113,22 +113,22 @@ export function Modal({ isOpen, onClose, title, children }: ModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div 
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm" 
+        className="fixed inset-0 bg-slate-900/40 backdrop-blur-[4px] transition-all" 
         onClick={onClose} 
       />
-      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in duration-200">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="text-xl font-bold text-gray-900">{title}</h3>
+      <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-100 animate-in fade-in zoom-in-95 duration-200 select-none">
+        <div className="px-6 py-5 border-b border-slate-50 bg-slate-50/30 flex items-center justify-between">
+          <h3 className="text-base font-black text-slate-800">{title}</h3>
           <button 
             onClick={onClose}
-            className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+            className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
           >
-            <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-        <div className="p-6">
+        <div className="p-6 max-h-[80vh] overflow-y-auto custom-scrollbar">
           {children}
         </div>
       </div>
