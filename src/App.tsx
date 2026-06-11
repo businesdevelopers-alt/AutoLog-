@@ -87,6 +87,9 @@ import { createAndExportToDocs } from './services/googleDocs';
 import { createInspectionForm, createFeedbackSurvey } from './services/googleForms';
 import { fetchGoogleContacts, createGoogleContact, deleteGoogleContact } from './services/googleContacts';
 import type { GoogleContact } from './services/googleContacts';
+import { fetchGoogleDriveFiles, createDriveFolder, uploadFileToDrive, deleteDriveFile } from './services/googleDrive';
+import type { GoogleDriveFile } from './services/googleDrive';
+import { Folder, FolderPlus, UploadCloud, HardDrive } from 'lucide-react';
 
 // Firebase Authentication & Firestore imports
 import { onAuthStateChanged, User, signInWithPopup, signOut } from 'firebase/auth';
@@ -116,7 +119,7 @@ const INITIAL_DATA: AppData = {
   breakdowns: [],
 };
 
-type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant' | 'contacts';
+type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant' | 'contacts' | 'gdrive';
 
 export default function App() {
   const [data, setData] = React.useState<AppData>(() => {
@@ -247,6 +250,92 @@ export default function App() {
       alert(err.message || 'فشل حذف جهة الاتصال');
     }
   };
+
+  // Google Drive states & handlers
+  const [driveFiles, setDriveFiles] = useState<GoogleDriveFile[]>([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [driveSearch, setDriveSearch] = useState('');
+  const [driveFilter, setDriveFilter] = useState('all'); // 'all' | 'folders' | 'sheets' | 'docs' | 'forms' | 'files'
+  const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [isUploadingToDrive, setIsUploadingToDrive] = useState(false);
+  const [driveSelectedFolderId, setDriveSelectedFolderId] = useState<string | undefined>(undefined);
+
+  const loadDriveFiles = async () => {
+    if (!gAccessToken) return;
+    setDriveLoading(true);
+    setDriveError(null);
+    try {
+      const files = await fetchGoogleDriveFiles(
+        gAccessToken, 
+        driveSearch, 
+        driveFilter === 'all' ? undefined : driveFilter
+      );
+      setDriveFiles(files);
+    } catch (err: any) {
+      console.error(err);
+      setDriveError(err.message || 'فشل تحميل ملفات Google Drive.');
+    } finally {
+      setDriveLoading(false);
+    }
+  };
+
+  const handleCreateDriveFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gAccessToken || !newFolderName.trim()) return;
+    setIsCreatingFolder(true);
+    try {
+      await createDriveFolder(gAccessToken, newFolderName, driveSelectedFolderId);
+      setIsFolderModalOpen(false);
+      setNewFolderName('');
+      loadDriveFiles();
+    } catch (err: any) {
+      alert(err.message || 'فشل إنشاء المجلد في Google Drive');
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  };
+
+  const handleUploadFileToDrive = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!gAccessToken || !file) return;
+    
+    setIsUploadingToDrive(true);
+    try {
+      await uploadFileToDrive(gAccessToken, file, driveSelectedFolderId);
+      loadDriveFiles();
+      alert('تم تحميل الملف بنجاح إلى حساب Google Drive الخاص بك!');
+    } catch (err: any) {
+      alert(err.message || 'فشل تحميل الملف إلى Google Drive');
+    } finally {
+      setIsUploadingToDrive(false);
+      if (e.target) e.target.value = '';
+    }
+  };
+
+  const handleDeleteDriveFile = async (fileId: string, fileName: string) => {
+    const isConfirmed = window.confirm(
+      `هل أنت متأكد من حذف الملف/المجلد "${fileName}" نهائياً من حساب Google Drive الخاص بك؟`
+    );
+    if (!isConfirmed) return;
+
+    try {
+      if (gAccessToken) {
+        await deleteDriveFile(gAccessToken, fileId);
+        setDriveFiles(prev => prev.filter(f => f.id !== fileId));
+      }
+    } catch (err: any) {
+      alert(err.message || 'فشل حذف الملف من Google Drive');
+    }
+  };
+
+  useEffect(() => {
+    if (gAccessToken && activeView === 'gdrive') {
+      loadDriveFiles();
+    }
+  }, [gAccessToken, activeView, driveSearch, driveFilter]);
 
   useEffect(() => {
     if (gAccessToken && activeView === 'contacts') {
@@ -1256,6 +1345,7 @@ export default function App() {
                       { id: 'breakdowns', label: 'سجل الأعطال', icon: AlertTriangle },
                       { id: 'contacts', label: 'جهات الاتصال', icon: Users },
                       { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
+                      { id: 'gdrive', label: 'حقيبة Google Drive', icon: HardDrive },
                     ].map((item) => (
                       <button
                         key={item.id}
@@ -1351,6 +1441,7 @@ export default function App() {
                 { id: 'breakdowns', label: 'سجل الأعطال', icon: AlertTriangle },
                 { id: 'contacts', label: 'جهات الاتصال', icon: Users },
                 { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
+                { id: 'gdrive', label: 'حقيبة Google Drive', icon: HardDrive },
               ].map((item) => (
                 <button
                   key={item.id}
@@ -1431,6 +1522,7 @@ export default function App() {
                 {activeView === 'settings' && 'الإعدادات والمظهر'}
                 {activeView === 'ai-assistant' && 'المساعد الذكي (AI)'}
                 {activeView === 'contacts' && 'جهات اتصال Google'}
+                {activeView === 'gdrive' && 'حقيبة ملفات Google Drive'}
               </h1>
               {selectedVehicle && (
                 <p className="text-[10px] text-slate-400 font-bold mt-0.5">المركبة الحالية: {selectedVehicle.make} {selectedVehicle.model}</p>
@@ -1474,6 +1566,24 @@ export default function App() {
                 <Plus className="w-4 h-4" />
                 إضافة جهة اتصال
               </Button>
+            )}
+            {activeView === 'gdrive' && gAccessToken && (
+              <div className="flex gap-2">
+                <Button onClick={() => setIsFolderModalOpen(true)}>
+                  <FolderPlus className="w-4 h-4" />
+                  إنشاء مجلد
+                </Button>
+                <label className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold px-4 py-2.5 rounded-xl text-xs shadow-sm transition-all cursor-pointer">
+                  <UploadCloud className="w-4 h-4" />
+                  تحميل ملف
+                  <input
+                    type="file"
+                    className="hidden"
+                    onChange={handleUploadFileToDrive}
+                    disabled={isUploadingToDrive}
+                  />
+                </label>
+              </div>
             )}
           </div>
         </header>
@@ -3413,6 +3523,209 @@ export default function App() {
                 )}
               </div>
             )}
+
+            {activeView === 'gdrive' && (
+              <div className="space-y-6">
+                {!gAccessToken ? (
+                  <div className="max-w-xl mx-auto py-16 px-4 text-center">
+                    <div className="w-20 h-20 bg-blue-50/50 rounded-full border border-blue-100/60 flex items-center justify-center mx-auto mb-6 text-blue-600 shadow-sm animate-bounce-subtle">
+                      <HardDrive className="w-10 h-10" />
+                    </div>
+                    <h2 className="text-xl font-black text-slate-800">تكامل سحابي مع Google Drive</h2>
+                    <p className="text-sm text-slate-500 leading-relaxed mt-3 mb-8">
+                      قم بربط وتفويض حساب Google الخاص بك للفتح المباشر لمستودع ملفاتك السحابي. ستتمكن من تصفح كافة جداول البيانات، التقارير الصادرة، استبيانات الفحص، ومجلدات الفواتير التي ينشئها التطبيق مباشرة من هنا بمرونة تامة، وتحميل الفواتير الجديدة فورياً.
+                    </p>
+                    <Button onClick={googleSignIn} className="mx-auto flex items-center gap-2 shadow-md">
+                      <Globe className="w-4 h-4" />
+                      مزامنة والربط مع Google Drive
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Main File Explorer Panel */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {/* Search, Filter, and Stats Header */}
+                      <div className="flex flex-col md:flex-row gap-4 items-center justify-between pb-4 border-b border-border-main">
+                        <div className="flex flex-1 gap-2 w-full md:w-auto">
+                          <div className="relative flex-1">
+                            <Search className="absolute right-3 top-3 w-4 h-4 text-slate-400" />
+                            <input
+                              type="text"
+                              placeholder="البحث في حقيبتك السحابية..."
+                              value={driveSearch}
+                              onChange={(e) => setDriveSearch(e.target.value)}
+                              className="w-full pr-10 pl-3 py-2.5 bg-white border border-[#E2E8F0] rounded-xl outline-none text-xs focus:border-brand transition-all font-semibold text-right"
+                            />
+                          </div>
+                          
+                          <select
+                            value={driveFilter}
+                            onChange={(e) => setDriveFilter(e.target.value)}
+                            className="bg-white border border-[#E2E8F0] rounded-xl px-3 py-2 text-xs font-semibold outline-none cursor-pointer focus:border-brand text-right"
+                          >
+                            <option value="all">كافة الملفات والمستندات</option>
+                            <option value="folders">المجلدات فقط 📂</option>
+                            <option value="sheets">جداول البيانات Sheets 💚</option>
+                            <option value="docs">مستندات Docs 💙</option>
+                            <option value="forms">النماذج Forms 💜</option>
+                            <option value="files">الملفات المصدرة والمرفوعات الأخرى 📄</option>
+                          </select>
+                        </div>
+                        
+                        <div className="flex gap-2 items-center shrink-0">
+                          <span className="text-slate-400 text-[10px] font-black uppercase whitespace-nowrap">
+                            الملفات المعروضة: {driveFiles.length}
+                          </span>
+                          <Button variant="ghost" size="sm" onClick={loadDriveFiles} className="text-slate-400 hover:text-slate-700" disabled={driveLoading}>
+                            <RefreshCw className={cn("w-4 h-4", driveLoading ? "animate-spin" : "")} />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {/* Files grid list */}
+                      {driveLoading ? (
+                        <div className="py-24 text-center text-slate-400 font-semibold text-xs flex flex-col items-center justify-center gap-3">
+                          <RefreshCw className="w-7 h-7 animate-spin text-brand" />
+                          جاري قراءة وتصفية دليل ملفات Google Drive السحابية...
+                        </div>
+                      ) : driveError ? (
+                        <div className="p-6 bg-red-50 border border-red-100 rounded-xl text-center text-red-600 text-xs font-semibold">
+                          {driveError}
+                          <Button size="sm" variant="ghost" onClick={loadDriveFiles} className="mt-3 text-red-700 hover:bg-red-100/50 mx-auto">
+                            إعادة تحميل مستندات السحابة
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {driveFiles.map(file => {
+                            const isFolder = file.mimeType === 'application/vnd.google-apps.folder';
+                            const isSheet = file.mimeType === 'application/vnd.google-apps.spreadsheet';
+                            const isDoc = file.mimeType === 'application/vnd.google-apps.document';
+                            const isForm = file.mimeType === 'application/vnd.google-apps.form';
+                            
+                            let typeBg = 'bg-slate-50 border-slate-100 text-slate-500';
+                            let typeIcon = '📄';
+                            
+                            if (isFolder) {
+                              typeBg = 'bg-amber-50 border-amber-100/60 text-amber-600';
+                              typeIcon = '📂';
+                            } else if (isSheet) {
+                              typeBg = 'bg-emerald-50 border-emerald-100/60 text-emerald-600';
+                              typeIcon = '📊';
+                            } else if (isDoc) {
+                              typeBg = 'bg-blue-50 border-blue-100/60 text-blue-600';
+                              typeIcon = '📝';
+                            } else if (isForm) {
+                              typeBg = 'bg-purple-50 border-purple-100/60 text-purple-600';
+                              typeIcon = '📋';
+                            }
+
+                            return (
+                              <Card key={file.id} className="relative group/card hover:border-brand/40 transition-all">
+                                <div className="flex items-start gap-4">
+                                  <div className={cn("w-12 h-12 rounded-xl flex items-center justify-center text-lg border font-black shrink-0", typeBg)}>
+                                    {typeIcon}
+                                  </div>
+                                  <div className="flex-1 min-w-0 text-right">
+                                    <h4 className="font-extrabold text-xs text-slate-800 line-clamp-2 leading-relaxed" title={file.name}>
+                                      {file.name}
+                                    </h4>
+                                    <p className="text-[9px] text-slate-400 font-bold mt-1.5" dir="rtl">
+                                      تاريخ الإضافة: {new Date(file.createdTime).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                    </p>
+                                    {!isFolder && file.size && (
+                                      <p className="text-[10px] text-slate-500 font-mono font-bold mt-0.5" dir="ltr">
+                                        الحجم: {((bytesVal) => {
+                                          if (!bytesVal) return '—';
+                                          const bytes = parseInt(bytesVal, 10);
+                                          if (isNaN(bytes)) return '—';
+                                          if (bytes === 0) return '0 Bytes';
+                                          const k = 1024;
+                                          const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                                          const i = Math.floor(Math.log(bytes) / Math.log(k));
+                                          return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                                        })(file.size)}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex gap-2 justify-end mt-4 pt-3 border-t border-slate-100 flex-row-reverse">
+                                  <Button 
+                                    variant="ghost" 
+                                    size="sm" 
+                                    className="text-red-500 hover:bg-red-50 hover:text-red-700 text-[10px] py-1 px-2.5 h-8 font-black"
+                                    onClick={() => handleDeleteDriveFile(file.id, file.name)}
+                                  >
+                                    حذف نهائي
+                                  </Button>
+                                  <a 
+                                    href={file.webViewLink}
+                                    target="_blank" 
+                                    rel="noopener noreferrer" 
+                                    className="inline-flex items-center justify-center px-3 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200/60 rounded-lg text-[10px] font-black h-8 transition-all"
+                                  >
+                                    عرض الملف السحابي ↗
+                                  </a>
+                                </div>
+                              </Card>
+                            );
+                          })}
+
+                          {driveFiles.length === 0 && (
+                            <div className="col-span-full py-16 text-center text-slate-400 font-semibold text-xs border border-dashed border-border-main rounded-xl">
+                              لم يتم العثور على أي ملفات أو مجلدات تطابق معايير التصفية والبحث في Google Drive.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Google Drive Status Sidebar */}
+                    <div className="space-y-6">
+                      <Card title="مستندات وتصدير" subtitle="صادرات أوتو كير السحابية">
+                        <div className="p-1 space-y-4">
+                          <p className="text-[11px] text-slate-500 leading-relaxed font-semibold">
+                            هنا تظهر كافة الفواتير، التقارير الصادرة لسياراتك، وقوائم الصيانة التي تم تصديرها إلى Google Sheets، ومحاضر الفحص المصدرة إلى Google Docs.
+                          </p>
+                          <div className="h-px bg-border-main" />
+                          
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">تقارير جداول البيانات:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">توليد أملس لملفات Excel/Sheets</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-blue-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">ملفات المحاضر والمستندات:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">عقود صيانة ومطبوعات Docs</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-purple-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">النماذج والمسوحات:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">فحص دوري وقوائم تفتيش المركبات</span>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+
+                      <div className="p-4 bg-emerald-50/40 border border-emerald-100/50 rounded-xl">
+                        <div className="flex gap-3">
+                          <HardDrive className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                          <div className="text-right">
+                            <h4 className="text-[11px] font-black text-slate-800">حفظ مركزي وآمن</h4>
+                            <p className="text-[10px] text-slate-500 mt-1 leading-relaxed font-semibold">
+                              حقيبتك السحابية تتصل مباشرة بمساحة تخزين Google Drive الخاصة بك. أي ملف يتم إنشاؤه عبر "تصدير إلى Google Sheets / Docs" من شاشة التقارير المالية، سيتم الاحتفاظ به في حسابك الشخصي بشكل آمن ودائم.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </main>
@@ -3453,6 +3766,25 @@ export default function App() {
           </div>
           <Button className="w-full py-3 mt-4 animate-pulse-subtle" type="submit" disabled={isSavingContact}>
             {isSavingContact ? 'جاري المزامنة والحفظ...' : 'حفظ ومزامنة جهة الاتصال في Google'}
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal isOpen={isFolderModalOpen} onClose={() => setIsFolderModalOpen(false)} title="إنشاء مجلد سحابي جديد في Google Drive">
+        <form className="space-y-4" onSubmit={handleCreateDriveFolder}>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">اسم المجلد السحابي (مطلوب)</label>
+            <input 
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right" 
+              required 
+              placeholder="مثلاً: فواتير ووصولات 2026" 
+              disabled={isCreatingFolder}
+            />
+          </div>
+          <Button className="w-full py-3 mt-4" type="submit" disabled={isCreatingFolder}>
+            {isCreatingFolder ? 'جاري إنشاء المجلد السحابي...' : 'إنشاء المجلد في Google Drive'}
           </Button>
         </form>
       </Modal>
