@@ -89,7 +89,11 @@ import { fetchGoogleContacts, createGoogleContact, deleteGoogleContact } from '.
 import type { GoogleContact } from './services/googleContacts';
 import { fetchGoogleDriveFiles, createDriveFolder, uploadFileToDrive, deleteDriveFile } from './services/googleDrive';
 import type { GoogleDriveFile } from './services/googleDrive';
-import { Folder, FolderPlus, UploadCloud, HardDrive } from 'lucide-react';
+import { fetchGoogleTaskLists, createGoogleTaskList, fetchGoogleTasks, createGoogleTask, updateGoogleTask, deleteGoogleTask, parseTaskNotes, formatTaskNotes } from './services/googleTasks';
+import type { GoogleTaskList, GoogleTask } from './services/googleTasks';
+import { fetchGmailMessages, sendGmailMessage, trashGmailMessage } from './services/googleGmail';
+import type { GmailMessage } from './services/googleGmail';
+import { Folder, FolderPlus, UploadCloud, HardDrive, CheckSquare, ListTodo, PlusSquare, Inbox, Send, GripVertical } from 'lucide-react';
 
 // Firebase Authentication & Firestore imports
 import { onAuthStateChanged, User, signInWithPopup, signOut } from 'firebase/auth';
@@ -119,7 +123,7 @@ const INITIAL_DATA: AppData = {
   breakdowns: [],
 };
 
-type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant' | 'contacts' | 'gdrive';
+type View = 'dashboard' | 'vehicles' | 'records' | 'expenses' | 'fuel' | 'reports' | 'compare' | 'breakdowns' | 'settings' | 'ai-assistant' | 'contacts' | 'gdrive' | 'gtasks' | 'gmail';
 
 export default function App() {
   const [data, setData] = React.useState<AppData>(() => {
@@ -342,6 +346,373 @@ export default function App() {
       loadContacts();
     }
   }, [gAccessToken, activeView]);
+
+  // Google Tasks states & handlers
+  const [taskLists, setTaskLists] = useState<GoogleTaskList[]>([]);
+  const [selectedTaskListId, setSelectedTaskListId] = useState<string>('');
+  const [tasks, setTasks] = useState<GoogleTask[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [tasksError, setTasksError] = useState<string | null>(null);
+  const [isTaskListModalOpen, setIsTaskListModalOpen] = useState(false);
+  const [newTaskListTitle, setNewTaskListTitle] = useState('');
+  const [isCreatingTaskList, setIsCreatingTaskList] = useState(false);
+  const [isCreatingTask, setIsCreatingTask] = useState(false);
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+  const [taskForm, setTaskForm] = useState({ title: '', notes: '', due: '', priority: 'medium' as 'high' | 'medium' | 'low', vehicleId: '' });
+  const [gtasksVehicleFilter, setGtasksVehicleFilter] = useState<string>('all');
+  const [gtasksPriorityFilter, setGtasksPriorityFilter] = useState<string>('all');
+  const [gtasksCustomOrder, setGtasksCustomOrder] = useState<Record<string, string[]>>(() => {
+    try {
+      const saved = localStorage.getItem('gtasks_custom_order');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [dragOverTaskId, setDragOverTaskId] = useState<string | null>(null);
+
+  const handleDragStart = (e: React.DragEvent, taskId: string) => {
+    setDraggedTaskId(taskId);
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', taskId);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent, taskId: string) => {
+    e.preventDefault();
+    if (draggedTaskId && draggedTaskId !== taskId) {
+      setDragOverTaskId(taskId);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent, targetTaskId: string) => {
+    e.preventDefault();
+    const sourceTaskId = draggedTaskId || e.dataTransfer.getData('text/plain');
+    if (!sourceTaskId || sourceTaskId === targetTaskId || !selectedTaskListId) {
+      handleDragEnd();
+      return;
+    }
+
+    const filteredTasks = tasks.filter(task => {
+      const meta = parseTaskNotes(task.notes);
+      if (gtasksVehicleFilter !== 'all' && meta.vehicleId !== gtasksVehicleFilter) {
+          return false;
+      }
+      if (gtasksPriorityFilter !== 'all' && (meta.priority || 'medium') !== gtasksPriorityFilter) {
+          return false;
+      }
+      return true;
+    });
+
+    const getWeight = (p?: string) => {
+      if (p === 'high') return 3;
+      if (p === 'medium') return 2;
+      if (p === 'low') return 1;
+      return 2;
+    };
+
+    const orderArray = gtasksCustomOrder[selectedTaskListId] || [];
+
+    const sortedTasks = [...filteredTasks].sort((a, b) => {
+      if (a.status === 'completed' && b.status !== 'completed') return 1;
+      if (a.status !== 'completed' && b.status === 'completed') return -1;
+      if (orderArray.length > 0) {
+        const idxA = orderArray.indexOf(a.id);
+        const idxB = orderArray.indexOf(b.id);
+        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+        if (idxA !== -1) return -1;
+        if (idxB !== -1) return 1;
+      }
+      const metaA = parseTaskNotes(a.notes);
+      const metaB = parseTaskNotes(b.notes);
+      return getWeight(metaB.priority) - getWeight(metaA.priority);
+    });
+
+    const sourceIndex = sortedTasks.findIndex(t => t.id === sourceTaskId);
+    const targetIndex = sortedTasks.findIndex(t => t.id === targetTaskId);
+
+    if (sourceIndex !== -1 && targetIndex !== -1) {
+      const reordered = [...sortedTasks];
+      const [removed] = reordered.splice(sourceIndex, 1);
+      reordered.splice(targetIndex, 0, removed);
+
+      const newOrderIds = reordered.map(t => t.id);
+      const existingOrder = gtasksCustomOrder[selectedTaskListId] || tasks.map(t => t.id);
+      const restIds = existingOrder.filter(id => !newOrderIds.includes(id));
+      const finalOrderIds = [...newOrderIds, ...restIds];
+
+      const newCustomOrder = { ...gtasksCustomOrder, [selectedTaskListId]: finalOrderIds };
+      setGtasksCustomOrder(newCustomOrder);
+      localStorage.setItem('gtasks_custom_order', JSON.stringify(newCustomOrder));
+    }
+
+    handleDragEnd();
+  };
+
+  const handleDragEnd = () => {
+    setDraggedTaskId(null);
+    setDragOverTaskId(null);
+  };
+
+  const loadTaskLists = async () => {
+    if (!gAccessToken) return;
+    setTasksLoading(true);
+    setTasksError(null);
+    try {
+      const lists = await fetchGoogleTaskLists(gAccessToken);
+      setTaskLists(lists);
+      if (lists.length > 0 && !selectedTaskListId) {
+        setSelectedTaskListId(lists[0].id);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setTasksError(err.message || 'فشل تحميل قوائم المهام من Google Tasks.');
+    } finally {
+      setTasksLoading(false);
+    }
+  };
+
+  const loadTasks = async (listId: string) => {
+    if (!gAccessToken || !listId) return;
+    setTasksLoading(true);
+    setTasksError(null);
+    try {
+      const items = await fetchGoogleTasks(gAccessToken, listId, true);
+      setTasks(items);
+    } catch (err: any) {
+      console.error(err);
+      setTasksError(err.message || 'فشل تحميل المهام.');
+    } finally {
+      setTasksLoading(false);
+    }
+  };
+
+  const handleCreateTaskList = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gAccessToken || !newTaskListTitle.trim()) return;
+    setIsCreatingTaskList(true);
+    try {
+      const newList = await createGoogleTaskList(gAccessToken, newTaskListTitle.trim());
+      setIsTaskListModalOpen(false);
+      setNewTaskListTitle('');
+      await loadTaskLists();
+      setSelectedTaskListId(newList.id);
+    } catch (err: any) {
+      alert(err.message || 'فشل إنشاء قائمة المهام.');
+    } finally {
+      setIsCreatingTaskList(false);
+    }
+  };
+
+  const handleCreateTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gAccessToken || !selectedTaskListId || !taskForm.title.trim()) return;
+    setIsCreatingTask(true);
+    try {
+      const formattedNotes = formatTaskNotes(
+        taskForm.notes.trim(),
+        taskForm.priority,
+        taskForm.vehicleId || undefined
+      );
+      await createGoogleTask(gAccessToken, selectedTaskListId, {
+        title: taskForm.title.trim(),
+        notes: formattedNotes,
+        due: taskForm.due || undefined
+      });
+      setIsTaskModalOpen(false);
+      setTaskForm({ title: '', notes: '', due: '', priority: 'medium', vehicleId: '' });
+      await loadTasks(selectedTaskListId);
+    } catch (err: any) {
+      alert(err.message || 'فشل إضافة المهمة.');
+    } finally {
+      setIsCreatingTask(false);
+    }
+  };
+
+  const handleToggleTaskStatus = async (task: GoogleTask) => {
+    if (!gAccessToken || !selectedTaskListId) return;
+    const nextStatus = task.status === 'completed' ? 'needsAction' : 'completed';
+    // Optimistic update
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, status: nextStatus } : t));
+    try {
+      await updateGoogleTask(gAccessToken, selectedTaskListId, task.id, {
+        status: nextStatus
+      });
+      await loadTasks(selectedTaskListId);
+    } catch (err: any) {
+      alert(err.message || 'فشل تحديث حالة المهمة.');
+      await loadTasks(selectedTaskListId);
+    }
+  };
+
+  const handleDeleteTask = async (taskId: string, taskTitle: string) => {
+    if (!gAccessToken || !selectedTaskListId) return;
+    const isConfirmed = window.confirm(`هل أنت متأكد من حذف المهمة "${taskTitle}" نهائياً من Google Tasks؟`);
+    if (!isConfirmed) return;
+
+    try {
+      await deleteGoogleTask(gAccessToken, selectedTaskListId, taskId);
+      setTasks(prev => prev.filter(t => t.id !== taskId));
+    } catch (err: any) {
+      alert(err.message || 'فشل حذف المهمة من Google Tasks.');
+    }
+  };
+
+  const handleClearCompletedTasks = async () => {
+    if (!gAccessToken || !selectedTaskListId) return;
+
+    const completedTasks = tasks.filter(t => t.status === 'completed');
+    if (completedTasks.length === 0) {
+      alert('لا توجد مهام مكتملة في هذه القائمة لحذفها.');
+      return;
+    }
+
+    const isConfirmed = window.confirm(`هل أنت متأكد من حذف جميع المهام المكتملة (${completedTasks.length} مهمة) نهائياً من Google Tasks؟`);
+    if (!isConfirmed) return;
+
+    setTasksLoading(true);
+    try {
+      await Promise.all(completedTasks.map(t => deleteGoogleTask(gAccessToken!, selectedTaskListId!, t.id)));
+      setTasks(prev => prev.filter(t => t.status !== 'completed'));
+      alert('تم حذف جميع المهام المكتملة بنجاح.');
+    } catch (err: any) {
+      alert(err.message || 'فشل حذف المهام المكتملة.');
+      await loadTasks(selectedTaskListId);
+    } finally {
+      setTasksLoading(false);
+    }
+  };
+
+  const syncReminderToGoogleTasks = async (reminder: any) => {
+    if (!gAccessToken) {
+      const goToTasks = window.confirm('يتطلب هذا الإجراء تسجيل الدخول باستخدام Google ومزامنة مهامك. هل ترغب في الذهاب والربط الآن؟');
+      if (goToTasks) {
+        setActiveView('gtasks');
+      }
+      return;
+    }
+
+    try {
+      let listId = selectedTaskListId;
+      let lists = taskLists;
+      if (lists.length === 0) {
+        lists = await fetchGoogleTaskLists(gAccessToken);
+        setTaskLists(lists);
+      }
+
+      if (lists.length === 0) {
+        const autoList = await createGoogleTaskList(gAccessToken, 'أوتو كير - تذكيرات الصيانة');
+        setTaskLists([autoList]);
+        listId = autoList.id;
+        setSelectedTaskListId(autoList.id);
+      } else if (!listId) {
+        listId = lists[0].id;
+        setSelectedTaskListId(lists[0].id);
+      }
+
+      const vehicle = data.vehicles.find(v => v.id === reminder.vehicleId);
+      const vehicleName = vehicle ? `${vehicle.make} ${vehicle.model}` : 'مركبة غير محددة';
+      const rawNotes = `تذكير صيانة من تطبيق أوتو كير:\nالمركبة: ${vehicleName}\nتاريخ التذكير: ${reminder.dueDate || 'غير محدد'}\nقراءة العداد المطلوبة: ${reminder.dueOdometer || 'غير محدد'} كم`;
+      
+      const formattedNotes = formatTaskNotes(rawNotes, 'high', reminder.vehicleId);
+
+      await createGoogleTask(gAccessToken, listId!, {
+        title: `🔧 صيانة: ${reminder.title}`,
+        notes: formattedNotes,
+        due: reminder.dueDate || undefined
+      });
+
+      alert(`تم بنجاح تصدير التذكير "${reminder.title}" كمهمة مجدولة في حقيبة Google Tasks الخاصة بك!`);
+      if (activeView === 'gtasks' && listId === selectedTaskListId) {
+        loadTasks(listId);
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || 'فشل تصدير المهام إلى Google Tasks');
+    }
+  };
+
+  useEffect(() => {
+    if (gAccessToken && activeView === 'gtasks') {
+      loadTaskLists();
+    }
+  }, [gAccessToken, activeView]);
+
+  useEffect(() => {
+    if (gAccessToken && activeView === 'gtasks' && selectedTaskListId) {
+      loadTasks(selectedTaskListId);
+    }
+  }, [gAccessToken, activeView, selectedTaskListId]);
+
+  // Google Gmail states & handlers
+  const [gmailMessages, setGmailMessages] = useState<GmailMessage[]>([]);
+  const [gmailLoading, setGmailLoading] = useState(false);
+  const [gmailError, setGmailError] = useState<string | null>(null);
+  const [gmailSearch, setGmailSearch] = useState('');
+  const [isSendEmailModalOpen, setIsSendEmailModalOpen] = useState(false);
+  const [emailForm, setEmailForm] = useState({ to: '', subject: '', body: '' });
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [expandedGmailId, setExpandedGmailId] = useState<string | null>(null);
+
+  const loadGmailMessages = async () => {
+    if (!gAccessToken) return;
+    setGmailLoading(true);
+    setGmailError(null);
+    try {
+      const messages = await fetchGmailMessages(gAccessToken, gmailSearch);
+      setGmailMessages(messages);
+    } catch (err: any) {
+      console.error(err);
+      setGmailError(err.message || 'فشل تحميل رسائل بريد Gmail.');
+    } finally {
+      setGmailLoading(false);
+    }
+  };
+
+  const handleSendEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gAccessToken || !emailForm.to.trim() || !emailForm.subject.trim() || !emailForm.body.trim()) return;
+    setIsSendingEmail(true);
+    try {
+      await sendGmailMessage(gAccessToken, {
+        to: emailForm.to.trim(),
+        subject: emailForm.subject.trim(),
+        body: emailForm.body.trim()
+      });
+      setIsSendEmailModalOpen(false);
+      setEmailForm({ to: '', subject: '', body: '' });
+      alert('تم إرسال البريد الإلكتروني بنجاح عبر Gmail!');
+      await loadGmailMessages();
+    } catch (err: any) {
+      alert(err.message || 'فشل إرسال البريد الإلكتروني.');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
+  const handleDeleteGmail = async (messageId: string, subject: string) => {
+    const isConfirmed = window.confirm(
+      `هل أنت متأكد من نقل الرسالة "${subject}" إلى سلة المهملات في Gmail؟`
+    );
+    if (!isConfirmed) return;
+
+    try {
+      if (gAccessToken) {
+        await trashGmailMessage(gAccessToken, messageId);
+        setGmailMessages(prev => prev.filter(m => m.id !== messageId));
+      }
+    } catch (err: any) {
+      alert(err.message || 'فشل نقل الرسالة إلى المهملات');
+    }
+  };
+
+  useEffect(() => {
+    if (gAccessToken && activeView === 'gmail') {
+      loadGmailMessages();
+    }
+  }, [gAccessToken, activeView, gmailSearch]);
 
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -1346,6 +1717,8 @@ export default function App() {
                       { id: 'contacts', label: 'جهات الاتصال', icon: Users },
                       { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
                       { id: 'gdrive', label: 'حقيبة Google Drive', icon: HardDrive },
+                      { id: 'gtasks', label: 'حقيبة Google Tasks', icon: CheckSquare },
+                      { id: 'gmail', label: 'بريد Gmail المدمج', icon: Mail },
                     ].map((item) => (
                       <button
                         key={item.id}
@@ -1442,6 +1815,8 @@ export default function App() {
                 { id: 'contacts', label: 'جهات الاتصال', icon: Users },
                 { id: 'ai-assistant', label: 'المساعد الذكي', icon: Sparkles },
                 { id: 'gdrive', label: 'حقيبة Google Drive', icon: HardDrive },
+                { id: 'gtasks', label: 'حقيبة Google Tasks', icon: CheckSquare },
+                { id: 'gmail', label: 'بريد Gmail المدمج', icon: Mail },
               ].map((item) => (
                 <button
                   key={item.id}
@@ -1523,6 +1898,8 @@ export default function App() {
                 {activeView === 'ai-assistant' && 'المساعد الذكي (AI)'}
                 {activeView === 'contacts' && 'جهات اتصال Google'}
                 {activeView === 'gdrive' && 'حقيبة ملفات Google Drive'}
+                {activeView === 'gtasks' && 'حقيبة مهام Google Tasks'}
+                {activeView === 'gmail' && 'إدارة بريد Gmail السحابي'}
               </h1>
               {selectedVehicle && (
                 <p className="text-[10px] text-slate-400 font-bold mt-0.5">المركبة الحالية: {selectedVehicle.make} {selectedVehicle.model}</p>
@@ -1583,6 +1960,32 @@ export default function App() {
                     disabled={isUploadingToDrive}
                   />
                 </label>
+              </div>
+            )}
+            {activeView === 'gtasks' && gAccessToken && (
+              <div className="flex gap-2">
+                {tasks.some(t => t.status === 'completed') && (
+                  <Button
+                    onClick={handleClearCompletedTasks}
+                    variant="outline"
+                    className="text-red-700 border-rose-200 bg-rose-50/50 hover:bg-rose-50 hover:border-rose-300 hover:text-red-800 font-bold"
+                    disabled={tasksLoading}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    حذف المهام المكتملة
+                  </Button>
+                )}
+                <Button onClick={() => setIsTaskListModalOpen(true)} variant="outline">
+                  <PlusSquare className="w-4 h-4 text-brand" />
+                  قائمة مهام جديدة
+                </Button>
+                <Button onClick={() => {
+                  setTaskForm({ title: '', notes: '', due: '', priority: 'medium', vehicleId: '' });
+                  setIsTaskModalOpen(true);
+                }}>
+                  <Plus className="w-4 h-4" />
+                  مهمة جديدة
+                </Button>
               </div>
             )}
           </div>
@@ -1706,6 +2109,9 @@ export default function App() {
                                     <p className="text-[10px] font-bold text-text-muted uppercase">{vehicle?.make} {vehicle?.model}</p>
                                   </div>
                                   <div className="flex gap-1 shrink-0">
+                                    <button onClick={() => syncReminderToGoogleTasks(reminder)} className="p-1 hover:text-blue-600 text-slate-400 transition-colors" title="مزامنة مع Google Tasks">
+                                       <CheckSquare className="w-4 h-4" />
+                                    </button>
                                     <button onClick={() => toggleReminder(reminder.id)} className="p-1 hover:text-green-600 transition-colors" title="تم الإنجاز">
                                        <CheckCircle2 className="w-4 h-4" />
                                     </button>
@@ -1832,6 +2238,25 @@ export default function App() {
                           </div>
                         </>
                       )}
+                      {gAccessToken && (() => {
+                        const vehicleTasksCount = tasks.filter(t => {
+                          const meta = parseTaskNotes(t.notes);
+                          return meta.vehicleId === vehicle.id && t.status !== 'completed';
+                        }).length;
+                        if (vehicleTasksCount === 0) return null;
+                        return (
+                          <>
+                            <div className="h-px bg-border-main" />
+                            <div className="flex justify-between items-center text-sm">
+                              <span className="font-bold text-text-muted uppercase text-[10px]">مهام Google المعلقة</span>
+                              <span className="font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-150 text-[10px] flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-600 animate-ping" />
+                                {vehicleTasksCount} مهام معلقة
+                              </span>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
 
                     <Button variant="outline" className="w-full text-xs" onClick={() => {
@@ -3665,58 +4090,565 @@ export default function App() {
                                     rel="noopener noreferrer" 
                                     className="inline-flex items-center justify-center px-3 py-1 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200/60 rounded-lg text-[10px] font-black h-8 transition-all"
                                   >
-                                    عرض الملف السحابي ↗
-                                  </a>
-                                </div>
-                              </Card>
-                            );
-                          })}
+                                    عرض الملف الس�                           <span className="text-slate-400 text-[10px] font-black uppercase whitespace-nowrap">
+                            المهام المجدولة: {tasks.length}
+                          </span>
+                          <Button variant="ghost" size="sm" onClick={() => loadTasks(selectedTaskListId)} className="text-slate-400 hover:text-slate-700" disabled={tasksLoading}>
+                            <RefreshCw className={cn("w-4 h-4", tasksLoading ? "animate-spin" : "")} />
+                          </Button>
+                        </div>
+                      </div>
 
-                          {driveFiles.length === 0 && (
-                            <div className="col-span-full py-16 text-center text-slate-400 font-semibold text-xs border border-dashed border-border-main rounded-xl">
-                              لم يتم العثور على أي ملفات أو مجلدات تطابق معايير التصفية والبحث في Google Drive.
+                      {/* Secondary Filter & Sort controls */}
+                      {!tasksLoading && tasks.length > 0 && (
+                        <div className="flex flex-col sm:flex-row gap-3 bg-slate-50/50 p-3.5 rounded-xl border border-border-main items-center text-xs">
+                          <div className="flex items-center gap-2 w-full sm:w-auto">
+                            <span className="text-slate-500 font-bold whitespace-nowrap">تصفية حسب المركبة:</span>
+                            <select
+                              value={gtasksVehicleFilter}
+                              onChange={(e) => setGtasksVehicleFilter(e.target.value)}
+                              className="bg-white border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs font-bold outline-none cursor-pointer focus:border-brand text-right min-w-[140px] flex-1 sm:flex-initial"
+                            >
+                              <option value="all">🚗 كل المركبات</option>
+                              {data.vehicles.map(v => (
+                                <option key={v.id} value={v.id}>{v.make} {v.model}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center gap-2 w-full sm:w-auto">
+                            <span className="text-slate-500 font-bold whitespace-nowrap">تصفية حسب الأولوية:</span>
+                            <select
+                              value={gtasksPriorityFilter}
+                              onChange={(e) => setGtasksPriorityFilter(e.target.value)}
+                              className="bg-white border border-[#E2E8F0] rounded-lg px-2.5 py-1.5 text-xs font-bold outline-none cursor-pointer focus:border-brand text-right min-w-[140px] flex-1 sm:flex-initial"
+                            >
+                              <option value="all">🔍 جميع الأولويات</option>
+                              <option value="high">🔴 عالية</option>
+                              <option value="medium">🟡 متوسطة</option>
+                              <option value="low">🔵 منخفضة</option>            {activeView === 'gtasks' && (
+              <div className="space-y-6 animate-fade-in text-right" dir="rtl">
+                {!gAccessToken ? (
+                  <div className="max-w-xl mx-auto py-16 px-4 text-center">
+                    <div className="w-20 h-20 bg-blue-50/50 rounded-full border border-blue-100/60 flex items-center justify-center mx-auto mb-6 text-blue-600 shadow-sm animate-bounce-subtle">
+                      <CheckSquare className="w-10 h-10" />
+                    </div>
+                    <h2 className="text-xl font-black text-slate-800">تكامل مهام Google Tasks</h2>
+                    <p className="text-sm text-slate-500 leading-relaxed mt-3 mb-8 font-semibold">
+                      قم بربط وتفويض حساب Google الخاص بك لجدولة ومتابعة مهام صيانة سيارتك. ستتمكن من تصفح كافة قوائم المهام وإدارتها وتصدير تذكيرات الصيانة مباشرة من التطبيق لتظهر كمهام في هاتفك وكل أجهزتك بمرونة تامة.
+                    </p>
+                    <Button onClick={googleSignIn} className="mx-auto flex items-center gap-2 shadow-md">
+                      <Globe className="w-4 h-4" />
+                      مزامنة والربط مع Google Tasks
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Tasks List Main Panel */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {/* List filter header */}
+                      <div className="flex flex-col md:flex-row gap-4 items-center justify-between pb-4 border-b border-border-main">
+                        <div className="flex items-center gap-3 w-full md:w-auto">
+                          <label className="text-xs font-black text-slate-500 whitespace-nowrap">قائمة المهام الحالية:</label>
+                          <select
+                            value={selectedTaskListId}
+                            onChange={(e) => setSelectedTaskListId(e.target.value)}
+                            className="bg-white border border-[#E2E8F0] rounded-xl px-4 py-2.5 text-xs font-bold outline-none cursor-pointer focus:border-brand text-right min-w-[200px]"
+                          >
+                            {taskLists.map(list => (
+                              <option key={list.id} value={list.id}>{list.title}</option>
+                            ))}
+                          </select>
+                        </div>
+                        
+                        <div className="flex gap-3 items-center shrink-0">
+                          {tasks.some(t => t.status === 'completed') && (
+                            <Button
+                              onClick={handleClearCompletedTasks}
+                              variant="outline"
+                              size="sm"
+                              className="text-red-700 border-rose-200 bg-rose-50/50 hover:bg-rose-50 hover:border-rose-300 hover:text-red-800 text-xs font-black shadow-sm flex items-center gap-1.5 h-8 px-3.5"
+                              disabled={tasksLoading}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              حذف المهام المكتملة
+                            </Button>
+                          )}
+                          <span className="tex                             const sortedTasks = [...filteredTasks].sort((a, b) => {
+                              if (a.status === 'completed' && b.status !== 'completed') return 1;
+                              if (a.status !== 'completed' && b.status === 'completed') return -1;
+                              const orderArray = gtasksCustomOrder[selectedTaskListId] || [];
+                              if (orderArray.length > 0) {
+                                const idxA = orderArray.indexOf(a.id);
+                                const idxB = orderArray.indexOf(b.id);
+                                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                                if (idxA !== -1) return -1;
+                                if (idxB !== -1) return 1;
+                              }
+                              const metaA = parseTaskNotes(a.notes);
+                              const metaB = parseTaskNotes(b.notes);
+                              return getWeight(metaB.priority) - getWeight(metaA.priority);
+                            });
+
+                            if (sortedTasks.length === 0) {
+                              return (
+                                <div className="py-16 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20">
+                                  <CheckSquare className="w-8 h-8 text-slate-400 opacity-20 mx-auto mb-2" />
+                                  <p className="text-xs text-slate-400 font-semibold">لا توجد مهام مطابقة لخيارات التصفية الحالية.</p>
+                                </div>
+                              );
+                            }
+
+                            return sortedTasks.map(task => {
+                              const isCompleted = task.status === 'completed';
+                              const meta = parseTaskNotes(task.notes);
+                              const hasNotes = !!meta.cleanNotes;
+                              const hasDue = !!task.due;
+                              const vehicle = meta.vehicleId ? data.vehicles.find(v => v.id === meta.vehicleId) : null;
+
+                              return (
+                                <div 
+                                  key={task.id} 
+                                  draggable
+                                  onDragStart={(e) => handleDragStart(e, task.id)}
+                                  onDragOver={(e) => handleDragOver(e, task.id)}
+                                  onDrop={(e) => handleDrop(e, task.id)}
+                                  onDragEnd={handleDragEnd}
+                                  className={cn(
+                                    "p-4 rounded-xl border flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between transition-all bg-white hover:border-brand/40 cursor-grab active:cursor-grabbing select-none",
+                                    isCompleted ? "bg-slate-50/80 opacity-60 border-slate-200" : "border-border-main",
+                                    draggedTaskId === task.id && "opacity-40 scale-[0.98] border-dashed border-brand",
+                                    dragOverTaskId === task.id && "border-brand border-2 bg-brand/5 scale-[1.01]"
+                                  )}
+                                >
+                                  <div className="flex gap-3 items-start min-w-0 flex-1">
+                                    <div className="flex items-center shrink-0 text-slate-400 hover:text-slate-600 cursor-grab mt-1">
+                                      <GripVertical className="w-4 h-4" />
+                                    </div>
+                                    <button 
+                                      onClick={() => handleToggleTaskStatus(task)} 
+                                      className={cn(
+                                        "w-5 h-5 rounded border-2 shrink-0 mt-0.5 flex items-center justify-center transition-colors hover:border-brand",
+                                        isCompleted ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-300 bg-white"
+                                      )}
+                                    >فضة</option>
+                            </select>
+                          </div>
+
+                          {(gtasksVehicleFilter !== 'all' || gtasksPriorityFilter !== 'all' || (gtasksCustomOrder[selectedTaskListId] && gtasksCustomOrder[selectedTaskListId].length > 0)) && (
+                            <div className="flex gap-3 sm:mr-auto mt-2 sm:mt-0">
+                              {(gtasksVehicleFilter !== 'all' || gtasksPriorityFilter !== 'all') && (
+                                <button
+                                  onClick={() => {
+                                    setGtasksVehicleFilter('all');
+                                    setGtasksPriorityFilter('all');
+                                  }}
+                                  className="text-[10px] font-black text-brand hover:underline cursor-pointer"
+                                >
+                                  إعادة تعيين التصفية ✕
+                                </button>
+                              )}
+                              {gtasksCustomOrder[selectedTaskListId] && gtasksCustomOrder[selectedTaskListId].length > 0 && (
+                                <button
+                                  onClick={() => {
+                                    const updated = { ...gtasksCustomOrder };
+                                    delete updated[selectedTaskListId];
+                                    setGtasksCustomOrder(updated);
+                                    localStorage.setItem('gtasks_custom_order', JSON.stringify(updated));
+                                  }}
+                                  className="text-[10px] font-black text-rose-600 hover:underline cursor-pointer"
+                                  title="العودة للترتيب التلقائي حسب الأولوية"
+                                >
+                                  إعادة تعيين الترتيب اليدوي ✕
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
                       )}
+
+                      {/* Tasks lists */}
+                      {tasksLoading ? (
+                        <div className="py-24 text-center text-slate-400 font-semibold text-xs flex flex-col items-center justify-center gap-3">
+                          <RefreshCw className="w-7 h-7 animate-spin text-brand" />
+                          جاري قراءة ومزامنة مهامك المخططة من Google Tasks...
+                        </div>
+                      ) : tasksError ? (
+                        <div className="p-6 bg-red-50 border border-red-100 rounded-xl text-center text-red-600 text-xs font-semibold">
+                          {tasksError}
+                          <Button size="sm" variant="ghost" onClick={loadTaskLists} className="mt-3 text-red-700 hover:bg-red-100/50 mx-auto">
+                            إعادة تحميل الاتصال
+                          </Button>
+                        </div>
+                      ) : tasks.length === 0 ? (
+                        <div className="py-20 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20">
+                          <CheckSquare className="w-10 h-10 text-slate-400 opacity-30 mx-auto mb-3" />
+                          <h3 className="text-sm font-black text-slate-700">لا توجد مهام في هذه القائمة</h3>
+                          <p className="text-xs text-slate-400 mt-1 font-semibold">ابدأ بإضافة مهام جديدة لسيارتك أو بمزامنة تذكيرات الصيانة!</p>
+                          <Button 
+                            className="mt-4 px-4 py-2 text-xs" 
+                            variant="outline"
+                            onClick={() => {
+                              setTaskForm({ title: '', notes: '', due: '', priority: 'medium', vehicleId: '' });
+                              setIsTaskModalOpen(true);
+                            }}
+                          >
+                            إضافة المهمة الأولى
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {(() => {
+                            const filteredTasks = tasks.filter(task => {
+                              const meta = parseTaskNotes(task.notes);
+                              if (gtasksVehicleFilter !== 'all' && meta.vehicleId !== gtasksVehicleFilter) {
+                                  return false;
+                              }
+                              if (gtasksPriorityFilter !== 'all' && (meta.priority || 'medium') !== gtasksPriorityFilter) {
+                                  return false;
+                              }
+                              return true;
+                            });
+
+                            const getWeight = (p?: string) => {
+                              if (p === 'high') return 3;
+                              if (p === 'medium') return 2;
+                              if (p === 'low') return 1;
+                              return 2;
+                            };
+
+                            const sortedTasks = [...filteredTasks].sort((a, b) => {
+                              if (a.status === 'completed' && b.status !== 'completed') return 1;
+                              if (a.status !== 'completed' && b.status === 'completed') return -1;
+                              const metaA = parseTaskNotes(a.notes);
+                              const metaB = parseTaskNotes(b.notes);
+                              return getWeight(metaB.priority) - getWeight(metaA.priority);
+                            });
+
+                            if (sortedTasks.length === 0) {
+                              return (
+                                <div className="py-16 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20">
+                                  <CheckSquare className="w-8 h-8 text-slate-400 opacity-20 mx-auto mb-2" />
+                                  <p className="text-xs text-slate-400 font-semibold">لا توجد مهام مطابقة لخيارات التصفية الحالية.</p>
+                                </div>
+                              );
+                            }
+
+                            return sortedTasks.map(task => {
+                              const isCompleted = task.status === 'completed';
+                              const meta = parseTaskNotes(task.notes);
+                              const hasNotes = !!meta.cleanNotes;
+                              const hasDue = !!task.due;
+                              const vehicle = meta.vehicleId ? data.vehicles.find(v => v.id === meta.vehicleId) : null;
+
+                              return (
+                                <div 
+                                  key={task.id} 
+                                  className={cn(
+                                    "p-4 rounded-xl border flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between transition-all bg-white hover:border-brand/40",
+                                    isCompleted ? "bg-slate-50/80 opacity-60 border-slate-200" : "border-border-main"
+                                  )}
+                                >
+                                  <div className="flex gap-3 items-start min-w-0 flex-1">
+                                    <button 
+                                      onClick={() => handleToggleTaskStatus(task)} 
+                                      className={cn(
+                                        "w-5 h-5 rounded border-2 shrink-0 mt-0.5 flex items-center justify-center transition-colors hover:border-brand",
+                                        isCompleted ? "bg-emerald-600 border-emerald-600 text-white" : "border-slate-300 bg-white"
+                                      )}
+                                    >
+                                      {isCompleted && (
+                                        <svg className="w-3.5 h-3.5 stroke-[3]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      )}
+                                    </button>
+
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex flex-wrap gap-2 items-center mb-1">
+                                        <p className={cn(
+                                          "text-sm font-extrabold text-slate-800",
+                                          isCompleted && "line-through text-slate-400 font-semibold"
+                                        )}>
+                                          {task.title}
+                                        </p>
+                                        
+                                        <span className={cn(
+                                          "inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold leading-none border",
+                                          meta.priority === 'high' && "bg-rose-50 text-rose-700 border-rose-100",
+                                          meta.priority === 'medium' && "bg-amber-50 text-amber-700 border-amber-100",
+                                          meta.priority === 'low' && "bg-blue-50 text-blue-700 border-blue-100",
+                                          (!meta.priority || meta.priority === 'medium') && "bg-amber-50 text-amber-500 border-amber-100"
+                                        )}>
+                                          {meta.priority === 'high' && '🔴 أولوية عالية'}
+                                          {meta.priority === 'low' && '🔵 أولوية منخفضة'}
+                                          {(meta.priority === 'medium' || !meta.priority) && '🟡 أولوية متوسطة'}
+                                        </span>
+
+                                        {vehicle && (
+                                          <span className="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-600 border border-slate-200 leading-none">
+                                            🚗 {vehicle.make} {vehicle.model} ({vehicle.licensePlate})
+                                          </span>
+                                        )}
+                                      </div>
+                                      
+                                      {hasNotes && (
+                                        <p className="text-[11px] text-slate-400 font-semibold mt-1 whitespace-pre-line leading-relaxed">
+                                          {meta.cleanNotes}
+                                        </p>
+                                      )}
+
+                                      {hasDue && (
+                                        <div className="inline-flex items-center gap-1.5 text-[10px] font-black text-slate-500 mt-2 bg-slate-100/60 px-2.5 py-1 rounded-md leading-none">
+                                          <svg className="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                          </svg>
+                                          تاريخ الإنجاز المطلوب: {new Date(task.due!).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex gap-2 self-end sm:self-auto">
+                                    <Button 
+                                      variant="ghost" 
+                                      size="sm" 
+                                      onClick={() => handleDeleteTask(task.id, task.title)}
+                                      className="p-1.5 hover:text-red-600 text-slate-400 font-bold"
+                                      title="حذف المهمة"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </Button>
+                                  </div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
                     </div>
 
-                    {/* Google Drive Status Sidebar */}
-                    <div className="space-y-6">
-                      <Card title="مستندات وتصدير" subtitle="صادرات أوتو كير السحابية">
+                    {/* Google Tasks Sidebar Description Panel */}
+                    <div className="space-y-4">
+                      <Card title="مزامنة وتنظيم الصيانة" subtitle="طاقة Google Workspace السحابية">
                         <div className="p-1 space-y-4">
                           <p className="text-[11px] text-slate-500 leading-relaxed font-semibold">
-                            هنا تظهر كافة الفواتير، التقارير الصادرة لسياراتك، وقوائم الصيانة التي تم تصديرها إلى Google Sheets، ومحاضر الفحص المصدرة إلى Google Docs.
+                            تنظيم صيانة سيارتك لم يكن سهلاً أبداً. يمكّنك هذا التكامل من مزامنة تذكيراتك وبطاقات العمليات من تطبيق أوتو كير مباشرة مع حقيبة Google Tasks الخاصة بك في ثوانٍ.
                           </p>
                           <div className="h-px bg-border-main" />
                           
                           <div className="space-y-3">
                             <div className="flex items-center gap-2 text-xs">
-                              <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full shrink-0" />
-                              <span className="font-extrabold text-slate-700 text-[11px]">تقارير جداول البيانات:</span>
-                              <span className="text-slate-500 text-[10px] font-bold">توليد أملس لملفات Excel/Sheets</span>
+                              <span className="w-2.5 h-2.5 bg-blue-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">مزامنة مباشرة:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">تصدير التذكيرات بضغطة زر واحدة</span>
                             </div>
                             <div className="flex items-center gap-2 text-xs">
-                              <span className="w-2.5 h-2.5 bg-blue-500 rounded-full shrink-0" />
-                              <span className="font-extrabold text-slate-700 text-[11px]">ملفات المحاضر والمستندات:</span>
-                              <span className="text-slate-500 text-[10px] font-bold">عقود صيانة ومطبوعات Docs</span>
+                              <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">جاهز للهاتف:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">تظهر في تطبيقات Google Calendar و Google Tasks</span>
                             </div>
                             <div className="flex items-center gap-2 text-xs">
                               <span className="w-2.5 h-2.5 bg-purple-500 rounded-full shrink-0" />
-                              <span className="font-extrabold text-slate-700 text-[11px]">النماذج والمسوحات:</span>
-                              <span className="text-slate-500 text-[10px] font-bold">فحص دوري وقوائم تفتيش المركبات</span>
+                              <span className="font-extrabold text-slate-700 text-[11px]">فرز وعنونة:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">تصنيفات منفصلة وصريحة لكل سيارة للتنظيم</span>
                             </div>
                           </div>
                         </div>
                       </Card>
 
-                      <div className="p-4 bg-emerald-50/40 border border-emerald-100/50 rounded-xl">
+                      <div className="p-4 bg-blue-50/40 border border-blue-100/50 rounded-xl">
                         <div className="flex gap-3">
-                          <HardDrive className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                          <CheckSquare className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
                           <div className="text-right">
-                            <h4 className="text-[11px] font-black text-slate-800">حفظ مركزي وآمن</h4>
+                            <h4 className="text-[11px] font-black text-slate-800">مزامنة تذكير الصيانة</h4>
                             <p className="text-[10px] text-slate-500 mt-1 leading-relaxed font-semibold">
-                              حقيبتك السحابية تتصل مباشرة بمساحة تخزين Google Drive الخاصة بك. أي ملف يتم إنشاؤه عبر "تصدير إلى Google Sheets / Docs" من شاشة التقارير المالية، سيتم الاحتفاظ به في حسابك الشخصي بشكل آمن ودائم.
+                              لتصدير أي تذكير صيانة كافيًا بالنقر فوق أيقونة "حقيبة Google Tasks" الـ <CheckSquare className="w-3 h-3 inline text-slate-600" /> المتواجدة في قائمة التذكيرات الجانبية على يمين الشاشة الرئيسية.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeView === 'gmail' && (
+              <div className="space-y-6 animate-fade-in text-right" dir="rtl">
+                {!gAccessToken ? (
+                  <div className="max-w-xl mx-auto py-16 px-4 text-center">
+                    <div className="w-20 h-20 bg-red-50/50 rounded-full border border-red-100/60 flex items-center justify-center mx-auto mb-6 text-red-600 shadow-sm animate-bounce-subtle">
+                      <Mail className="w-10 h-10" />
+                    </div>
+                    <h2 className="text-xl font-black text-slate-800">إدارة حساب البريد Gmail السحابي</h2>
+                    <p className="text-sm text-slate-500 leading-relaxed mt-3 mb-8 font-semibold">
+                      قم بربط وتفويض حساب Google الخاص بك لتصفح وقراءة وإرسال رسائل البريد الإلكتروني (Gmail) مباشرة من التطبيق. يمكنك إرسال تقارير مفصلة فورية للصيانة أو المصاريف لورشتك المفضلة أو لشركائك بسهولة ويسر.
+                    </p>
+                    <Button onClick={googleSignIn} className="mx-auto flex items-center gap-2 shadow-md">
+                      <Globe className="w-4 h-4" />
+                      الربط وتسجيل الدخول بـ Gmail
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Left: Email list */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {/* Search & Actions Bar */}
+                      <div className="flex flex-col md:flex-row gap-4 items-center justify-between pb-4 border-b border-border-main">
+                        <div className="flex items-center gap-3 w-full md:w-auto relative flex-1 flex-row">
+                          <Search className="absolute right-3 top-3 w-4 h-4 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="ابحث في رسائل البريد الإلكتروني..."
+                            value={gmailSearch}
+                            onChange={(e) => setGmailSearch(e.target.value)}
+                            className="w-full bg-white border border-[#E2E8F0] rounded-xl pr-9 pl-4 py-2 text-xs font-semibold outline-none focus:border-brand text-right"
+                          />
+                        </div>
+                        
+                        <div className="flex gap-2 items-center shrink-0">
+                          <Button 
+                            onClick={() => {
+                              setEmailForm({ to: '', subject: '', body: '' });
+                              setIsSendEmailModalOpen(true);
+                            }}
+                            className="bg-red-600 hover:bg-red-700 text-white flex items-center gap-1.5 py-2.5 text-xs font-bold leading-none shrink-0"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            إنشاء رسالة جديدة
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={loadGmailMessages} className="text-slate-400 hover:text-slate-700" disabled={gmailLoading}>
+                            <RefreshCw className={cn("w-4 h-4", gmailLoading ? "animate-spin" : "")} />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {/* Messages body or loader */}
+                      {gmailLoading ? (
+                        <div className="py-24 text-center text-slate-400 font-semibold text-xs flex flex-col items-center justify-center gap-3">
+                          <RefreshCw className="w-7 h-7 animate-spin text-red-500" />
+                          جاري الاتصال السحابي وتحميل رسائل بريد Gmail الآمن...
+                        </div>
+                      ) : gmailError ? (
+                        <div className="p-6 bg-red-50 border border-red-100 rounded-xl text-center text-red-600 text-xs font-semibold">
+                          {gmailError}
+                          <Button size="sm" variant="ghost" onClick={loadGmailMessages} className="mt-3 text-red-700 hover:bg-red-100/50 mx-auto">
+                            إعادة الاتصال
+                          </Button>
+                        </div>
+                      ) : gmailMessages.length === 0 ? (
+                        <div className="py-20 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/20">
+                          <Inbox className="w-10 h-10 text-slate-400 opacity-30 mx-auto mb-3" />
+                          <h3 className="text-sm font-black text-slate-700">البريد خالي تماماً</h3>
+                          <p className="text-xs text-slate-400 mt-1 font-semibold">لا توجد رسائل بريد مطابقة لبحثك في صندوق الوارد.</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {gmailMessages.map(msg => {
+                            const isExpanded = expandedGmailId === msg.id;
+                            return (
+                              <div 
+                                key={msg.id} 
+                                className={cn(
+                                  "p-4 rounded-xl border flex flex-col transition-all bg-white hover:border-red-400/40",
+                                  !msg.isRead ? "border-red-100 bg-red-50/10" : "border-border-main"
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-4 cursor-pointer" onClick={() => setExpandedGmailId(isExpanded ? null : msg.id)}>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className={cn("text-xs font-extrabold text-slate-700", !msg.isRead && "text-red-700")}>
+                                        {msg.from || 'صاحب الإرسال'}
+                                      </span>
+                                      <span className="text-[10px] text-slate-400 font-bold">
+                                        {msg.date ? new Date(msg.date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                      </span>
+                                      {!msg.isRead && (
+                                        <span className="bg-red-100 text-red-800 text-[9px] px-1.5 py-0.5 rounded font-black">غير مقروء</span>
+                                      )}
+                                    </div>
+                                    <h4 className={cn("text-xs font-bold text-slate-700 mt-1.5", !msg.isRead && "font-black text-slate-900")}>
+                                      {msg.subject}
+                                    </h4>
+                                    {!isExpanded && (
+                                      <p className="text-[11px] text-slate-400 font-medium truncate mt-1">
+                                        {msg.snippet}
+                                      </p>
+                                    )}
+                                  </div>
+
+                                  <div className="flex gap-2 shrink-0 self-center">
+                                    <Button 
+                                      variant="ghost" 
+                                      size="sm" 
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDeleteGmail(msg.id, msg.subject || '');
+                                      }}
+                                      className="p-1.5 hover:text-red-600 text-slate-400 font-bold"
+                                      title="حذف الرسالة"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </Button>
+                                  </div>
+                                </div>
+
+                                {isExpanded && (
+                                  <div className="mt-4 pt-4 border-t border-dashed border-slate-100">
+                                    <div className="text-[10px] text-slate-400 space-y-0.5 mb-3 font-semibold bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                                      <p><strong className="text-slate-600 font-black">من:</strong> {msg.from}</p>
+                                      <p><strong className="text-slate-600 font-black">إلى:</strong> {msg.to}</p>
+                                      <p><strong className="text-slate-600 font-black">التاريخ:</strong> {msg.date}</p>
+                                    </div>
+                                    <div className="text-xs text-slate-700 leading-relaxed font-semibold bg-slate-50/40 p-3 rounded-lg border border-slate-100 whitespace-pre-wrap max-h-96 overflow-y-auto">
+                                      {msg.body}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right Info Panel */}
+                    <div className="space-y-4">
+                      <Card title="إرسال التقارير بالبريد" subtitle="أتمتة المراسلات السحابية">
+                        <div className="p-1 space-y-4">
+                          <p className="text-[11px] text-slate-500 leading-relaxed font-semibold">
+                            هنا يمكنك التحكم الكامل ومتابعة مراسلاتك البريدية عبر Gmail بنقرة واحدة. يتيح لك هذا الجزء تصفح صندوقك السحابي الآمن وإرسال رسائل لورشتك المفضلة أو ميكانيكي سيارتك بالتقارير وجداول العمل لسهولة المتابعة.
+                          </p>
+                          <div className="h-px bg-border-main" />
+                          
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-red-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">مظهر نظيف وآمن:</span>
+                              <span className="text-slate-500 text-[10px] font-bold">بوابة بريدية متكاملة تماماً</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-amber-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">إرسال فوري:</span>
+                              <span className="text-slate-500 text-[10px] font-bold font-semibold">إرسال تقارير الصيانة للغير مباشرة</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full shrink-0" />
+                              <span className="font-extrabold text-slate-700 text-[11px]">تكامل التقارير:</span>
+                              <span className="text-slate-500 text-[10px] font-bold font-semibold">إرسال تفاصيل الفواتير والوقود</span>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+
+                      <div className="p-4 bg-red-50/40 border border-red-100/50 rounded-xl">
+                        <div className="flex gap-3">
+                          <Mail className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                          <div className="text-right">
+                            <h4 className="text-[11px] font-black text-slate-800">تواصل أوتوماتيكي دائم</h4>
+                            <p className="text-[10px] text-slate-500 mt-1 leading-relaxed font-semibold">
+                              تستطيع تحضير أي تقرير للسيارات من شاشة "توليد التقارير" المخصصة، ثم نسخ تفاصيله الممتازة وإرسالها إلى ميكانيكي سيارتك لجدولة الموعد المطلوب في الورشة بمرونة خارقة.
                             </p>
                           </div>
                         </div>
@@ -3731,6 +4663,94 @@ export default function App() {
       </main>
 
       {/* Modals */}
+      <Modal isOpen={isTaskListModalOpen} onClose={() => setIsTaskListModalOpen(false)} title="إنشاء قائمة مهام جديدة في Google Tasks">
+        <form className="space-y-4 text-right" onSubmit={handleCreateTaskList}>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">اسم قائمة المهام (مطلوب)</label>
+            <input 
+              value={newTaskListTitle}
+              onChange={(e) => setNewTaskListTitle(e.target.value)}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right" 
+              required 
+              placeholder="مثلاً: صيانة سيارتي الكورولا 2026" 
+              disabled={isCreatingTaskList}
+            />
+          </div>
+          <Button className="w-full py-3 mt-4" type="submit" disabled={isCreatingTaskList}>
+            {isCreatingTaskList ? 'جاري إنشاء قائمة المهام...' : 'إنشاء في Google Tasks'}
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal isOpen={isTaskModalOpen} onClose={() => setIsTaskModalOpen(false)} title="إضافة مهمة جديدة إلى Google Tasks">
+        <form className="space-y-4 text-right" onSubmit={handleCreateTask} dir="rtl">
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">عنوان المهمة (مطلوب)</label>
+            <input 
+              value={taskForm.title}
+              onChange={(e) => setTaskForm(prev => ({ ...prev, title: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right font-semibold" 
+              required 
+              placeholder="مثلاً: تغيير زيت المحرك والفلتر" 
+              disabled={isCreatingTask}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">تفاصيل وملاحظات المهمة (اختياري)</label>
+            <textarea 
+              value={taskForm.notes}
+              onChange={(e) => setTaskForm(prev => ({ ...prev, notes: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-xs transition-all text-right min-h-[80px]" 
+              placeholder="مثلاً: استخدام زيت لزوجة 5W-30 وفلتر الزيت الأصلي." 
+              disabled={isCreatingTask}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1.5">أولوية المهمة</label>
+              <select
+                value={taskForm.priority}
+                onChange={(e) => setTaskForm(prev => ({ ...prev, priority: e.target.value as any }))}
+                className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right cursor-pointer font-semibold"
+                disabled={isCreatingTask}
+              >
+                <option value="high">🔴 عالية (High)</option>
+                <option value="medium">🟡 متوسطة (Medium)</option>
+                <option value="low">🔵 منخفضة (Low)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1.5">ربط المهمة بأحد المركبات</label>
+              <select
+                value={taskForm.vehicleId}
+                onChange={(e) => setTaskForm(prev => ({ ...prev, vehicleId: e.target.value }))}
+                className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right cursor-pointer font-semibold"
+                disabled={isCreatingTask}
+              >
+                <option value="">🚫 غير مرتبطة بمركبة محددة</option>
+                {data.vehicles.map(v => (
+                  <option key={v.id} value={v.id}>
+                    🚗 {v.make} {v.model} ({v.licensePlate})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">تاريخ الإنجاز المطلوب (اختياري)</label>
+            <input 
+              type="date"
+              value={taskForm.due}
+              onChange={(e) => setTaskForm(prev => ({ ...prev, due: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right" 
+              disabled={isCreatingTask}
+            />
+          </div>
+          <Button className="w-full py-3 mt-4" type="submit" disabled={isCreatingTask}>
+            {isCreatingTask ? 'جاري إضافة المهمة...' : 'إضافة المهمة إلى قائمة Google Tasks'}
+          </Button>
+        </form>
+      </Modal>
       <Modal isOpen={isCreateContactModalOpen} onClose={() => setIsCreateContactModalOpen(false)} title="إضافة جهة اتصال جديدة إلى Google">
         <form className="space-y-4" onSubmit={handleCreateContact}>
           <div>
@@ -3785,6 +4805,82 @@ export default function App() {
           </div>
           <Button className="w-full py-3 mt-4" type="submit" disabled={isCreatingFolder}>
             {isCreatingFolder ? 'جاري إنشاء المجلد السحابي...' : 'إنشاء المجلد في Google Drive'}
+          </Button>
+        </form>
+      </Modal>
+
+      <Modal isOpen={isSendEmailModalOpen} onClose={() => setIsSendEmailModalOpen(false)} title="إرسال بريد إلكتروني سحابي جديد عبر Gmail">
+        <form className="space-y-4 text-right" onSubmit={handleSendEmail} dir="rtl">
+          <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 mb-2">
+            <span className="text-[10px] font-black text-slate-400 block mb-2">قوالب إرسال سريعة وممتازة:</span>
+            <div className="flex gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => {
+                  const activeVehicleName = selectedVehicle ? `${selectedVehicle.make} ${selectedVehicle.model}` : 'كل المركبات';
+                  setEmailForm({
+                    to: '',
+                    subject: `تقرير الصيانة الدوري لمركبة: ${activeVehicleName}`,
+                    body: `مرحباً،\n\nأرسل لكم تقرير الصيانة الدوري الخاص بالمركبة (${activeVehicleName}) عبر تطبيق أوتو كير.\n\nالرجاء الاطلاع واعتماد الخطوات المبرمة.\n\nشاكر ومقدر لكم تعاونكم.`
+                  });
+                }}
+                className="bg-white border border-slate-200 hover:border-red-400 text-slate-600 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+              >
+                📝 تقرير صيانة دوري
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const activeVehicleName = selectedVehicle ? `${selectedVehicle.make} ${selectedVehicle.model}` : 'مركباتي';
+                  setEmailForm({
+                    to: '',
+                    subject: `طلب عرض أسعار قطع غيار صيانة - ${activeVehicleName}`,
+                    body: `السلام عليكم ورحمة الله وبركاته،\n\nأود طلب عرض أسعار لقطع الغيار والصيانة لسيارتي من نوع (${activeVehicleName}).\n\nالقطع المطلوبة لجدولة الصيانة هي:\n- فلتر زيت المحرك\n- زيت المحرك\n- قطع فحص الفرامل\n\nالرجاء إفادتي بقيمة التكلفة الإجمالية والمدة المتوقعة.\n\nمع جزييل الشكر والامتنان.`
+                  });
+                }}
+                className="bg-white border border-slate-200 hover:border-red-400 text-slate-600 text-[10px] font-bold px-2.5 py-1.5 rounded-lg transition-colors cursor-pointer"
+              >
+                🛠️ طلب تسعيرة صيانة
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">البريد الإلكتروني للمستلم (مطلوب)</label>
+            <input 
+              type="email"
+              value={emailForm.to}
+              onChange={(e) => setEmailForm(prev => ({ ...prev, to: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-left font-semibold" 
+              required 
+              placeholder="recipient@example.com" 
+              disabled={isSendingEmail}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">موضوع الرسالة (مطلوب)</label>
+            <input 
+              value={emailForm.subject}
+              onChange={(e) => setEmailForm(prev => ({ ...prev, subject: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-sm transition-all text-right font-bold" 
+              required 
+              placeholder="موضوع الرسالة البريدية" 
+              disabled={isSendingEmail}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 mb-1.5">نص ومحتوى البريد الإلكتروني (مطلوب)</label>
+            <textarea 
+              value={emailForm.body}
+              onChange={(e) => setEmailForm(prev => ({ ...prev, body: e.target.value }))}
+              className="w-full p-2.5 bg-[#F9FAFB] border border-[#E2E8F0] rounded-lg focus:border-brand outline-none text-xs transition-all text-right min-h-[160px] font-semibold leading-relaxed" 
+              required
+              placeholder="اكتب هنا كافة التفاصيل والتقارير التي تود إرسالها..." 
+              disabled={isSendingEmail}
+            />
+          </div>
+          <Button className="w-full py-3 mt-4 bg-red-600 hover:bg-red-700 text-white font-bold flex items-center justify-center gap-2" type="submit" disabled={isSendingEmail}>
+            <Send className="w-4 h-4" />
+            {isSendingEmail ? 'جاري إرسال البريد الإلكتروني...' : 'إرسال الرسالة السحابية فورياً'}
           </Button>
         </form>
       </Modal>

@@ -2,5 +2,7 @@
   "name": "AutoLog - سجلات صيانة وفواتير السيارات",
   "description": "تطبيق لإدارة سجلات صيانة السيارات وتتبع المصاريف وجداول الصيانة لعدة مركبات مع واجهة عربية متكاملة.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
